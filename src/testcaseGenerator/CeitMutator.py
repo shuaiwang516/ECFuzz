@@ -54,5 +54,6 @@ class CeitMutator(Mutator):
             else:
                 item.value = conf.value
             testcase.confItemList.append(item)
-        
+
+        testcase.captureMutationFromSeed(seed)
         return testcase

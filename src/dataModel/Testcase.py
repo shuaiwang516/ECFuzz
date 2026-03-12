@@ -1,8 +1,8 @@
 import os
+from typing import Dict, List
 
 from dataModel.ConfItem import ConfItem
 from dataModel.Seed import Seed
-from typing import List
 
 from utils.Configuration import Configuration
 import xml.etree.ElementTree as ET
@@ -20,6 +20,12 @@ class Testcase(Seed):
         if confItems is None:
             confItems = []
         super().__init__(confItems)
+        self.mutatedConfNames: List[str] = []
+        self.mutationBeforeValues: Dict[str, str] = {}
+        self.mutationAfterValues: Dict[str, str] = {}
+        self.systemExercisedConfNames: List[str] = []
+        self.systemExerciseWorkloadSignature: str = ""
+        self.mutationCandidateSource: str = "baseline"
         # self.fileDir = Configuration.fuzzerConf['unit_testcase_dir']
 
     def __str__(self) -> str:
@@ -82,3 +88,18 @@ class Testcase(Seed):
             self.logger.info("it doesn't support the given project : ".format(Configuration.fuzzerConf['project']))
 
         return self.filePath
+
+    def captureMutationFromSeed(self, seed: Seed) -> None:
+        seed_value_map = {conf.name: conf.value for conf in seed.confItemList}
+        self.mutatedConfNames = []
+        self.mutationBeforeValues = {}
+        self.mutationAfterValues = {}
+        self.lastExercisedConfNames = list(getattr(seed, "lastExercisedConfNames", []))
+        self.exerciseWorkloadSignature = getattr(seed, "exerciseWorkloadSignature", "")
+
+        for conf in self.confItemList:
+            before_value = seed_value_map.get(conf.name)
+            if before_value != conf.value:
+                self.mutatedConfNames.append(conf.name)
+                self.mutationBeforeValues[conf.name] = before_value
+                self.mutationAfterValues[conf.name] = conf.value

@@ -9,12 +9,15 @@ from dataModel.Testcase import Testcase
 from testValidator.DichotomyTrimmer import DichotomyTrimmer
 from testValidator.SystemTester import SystemTester
 from testValidator.UnitTester import UnitTester
+from utils.ComparisonMetricsRecorder import ComparisonMetricsRecorder
 from utils.ConfAnalyzer import ConfAnalyzer
 from utils.Configuration import Configuration
+from utils.ExerciseGuidanceState import ExerciseGuidanceState
 from utils.InstanceCreator import InstanceCreator
 from utils.ShowStats import ShowStats
 from utils.Logger import Logger, getLogger
 from utils.MongoDb import MongoDb
+from utils.ParamTraceCollector import ParamTraceCollector
 from utils.getCov import getCov
 from testValidator.MonitorThread import MonitorThread
 from queue import Queue
@@ -31,6 +34,7 @@ class TestValidator(object):
         self.skipUnitTest = self.fuzzerConf['skip_unit_test']
         self.sysTester = InstanceCreator.getInstance(self.fuzzerConf['systemtester'])
         self.forceSystemTestingRatio = float(self.fuzzerConf['force_system_testing_ratio'])
+        self.requireUnitPassForSystemTest = self.fuzzerConf.get('require_unit_pass_for_system_test', 'False')
         confItems = ConfAnalyzer.confItemsBasic + ConfAnalyzer.confItemsMutable
         confItemValueMap = ConfAnalyzer.confItemValueMap
         defaultValueMap = {name: confItemValueMap[name] for name in confItems}
@@ -52,6 +56,102 @@ class TestValidator(object):
         self.covStartTime = ShowStats.fuzzerStartTime
         self.startTime = ShowStats.fuzzerStartTime
         self.saveTime = ShowStats.fuzzerStartTime
+        self.paramTraceCollector = ParamTraceCollector()
+        self.comparisonMetrics = ComparisonMetricsRecorder()
+
+    def ensure_testcase_written(self, testcase: Testcase) -> None:
+        if testcase.filePath:
+            return
+        testcase.writeToFile(fileDir=Configuration.fuzzerConf['unit_testcase_dir'])
+
+    @staticmethod
+    def prepareTestcaseForExecution(testcase: Testcase) -> None:
+        if Configuration.fuzzerConf['project'] == 'hadoop-common':
+            conf = ConfItem('fs.defaultFS', 'PORT', 'hdfs://127.0.0.1:9000')
+            if not testcase.__contains__(conf):
+                testcase.addConfItem(ConfItem('fs.defaultFS', 'PORT', 'hdfs://127.0.0.1:9000'))
+
+        if Configuration.fuzzerConf['project'] == 'hbase':
+            conf = ConfItem('hbase.rootdir', 'DIRPATH', '/home/hadoop/hbase-2.2.2-work/hbase-tmp')
+            if not testcase.__contains__(conf):
+                testcase.addConfItem(ConfItem('hbase.rootdir', 'DIRPATH', '/home/hadoop/hbase-2.2.2-work/hbase-tmp'))
+
+    def buildDefaultSystemTestcase(self) -> Testcase:
+        confItems = []
+        for name, value in ConfAnalyzer.confItemValueMap.items():
+            confItems.append(ConfItem(name, ConfAnalyzer.confItemTypeMap[name], value))
+        testcase = Testcase(confItems)
+        testcase.mutationCandidateSource = "bootstrap"
+        testcase.exerciseWorkloadSignature = ExerciseGuidanceState.workloadSignature
+        self.prepareTestcaseForExecution(testcase)
+        return testcase
+
+    def updateExerciseState(self, testcase: Testcase, system_result: TestResult, bootstrap: bool = False):
+        exercised_names = list(self.sysTester.lastExercisedConfNames)
+        testcase.systemExercisedConfNames = exercised_names
+        testcase.systemExerciseWorkloadSignature = ExerciseGuidanceState.workloadSignature
+        testcase.lastExercisedConfNames = exercised_names
+        testcase.exerciseWorkloadSignature = ExerciseGuidanceState.workloadSignature
+        if bootstrap:
+            ExerciseGuidanceState.mark_bootstrap(testcase.fileName or testcase.filePath, exercised_names)
+            new_global = set(exercised_names)
+        else:
+            new_global, _ = ExerciseGuidanceState.record_system_run(
+                exercised_names,
+                accepted=(system_result is not None and system_result.status == 0),
+            )
+
+        for param_name in sorted(new_global):
+            self.comparisonMetrics.record_exercised_discovery(testcase, param_name)
+        return exercised_names
+
+    def normalizeFailureSignature(self, result: TestResult):
+        if result is None or result.status == 0:
+            return "", ""
+        exception_list = self.sysTester.dealWithExp(result.description)
+        exception_class = "" if len(exception_list) == 0 else exception_list[0]
+        if exception_class != "":
+            return f"sysFailType:{result.sysFailType}:{exception_class}", exception_class
+        description = result.description or ""
+        first_line = ""
+        for line in description.splitlines():
+            stripped = line.strip()
+            if stripped != "":
+                first_line = stripped[:160]
+                break
+        if first_line == "":
+            first_line = "no-description"
+        return f"sysFailType:{result.sysFailType}:{first_line}", exception_class
+
+    def runExerciseBootstrap(self, stopSoon: Queue):
+        if ExerciseGuidanceState.should_run_bootstrap() is False:
+            return None
+        ShowStats.currentJob = 'bootstrap system tracking'
+        testcase = self.buildDefaultSystemTestcase()
+        testcase.writeToFile(
+            fileDir=Configuration.fuzzerConf['unit_testcase_dir'],
+            fileName="Bootstrap-default",
+        )
+        result = self.sysTester.runTest(testcase, stopSoon, recordStats=False)
+        self.updateExerciseState(testcase, result, bootstrap=True)
+        self.comparisonMetrics.record_bootstrap(testcase, testcase.systemExercisedConfNames, result)
+        self.comparisonMetrics.record_snapshot()
+        return result
+
+    def finalize_without_system(self, testcase: Testcase, startTime: float, utRes: TestResult):
+        self.ensure_testcase_written(testcase)
+        self.paramTraceCollector.record_testcase(
+            testcase,
+            self.unitTester.last_ran_tests,
+            self.unitTester.last_trace_events,
+            [],
+            utRes,
+            None,
+        )
+        endTime = time.time()
+        self.totalTime += endTime - startTime
+        ShowStats.ecFuzzExecSpeed = self.testcaseNum / self.totalTime if self.totalTime else 0
+        return utRes, None, testcase
 
     def runTest(self, testcase: Testcase, stopSoon: Queue) -> TestResult:
         """
@@ -120,17 +220,7 @@ class TestValidator(object):
         
         # self.logger.info(f'>>>>[TestValidator] this time unit-cov is : {self.covUnitData}; sys-cov is : {self.covSysData}')
         
-        if Configuration.fuzzerConf['project'] == 'hadoop-common':
-            # add fs.defaultFS=hdfs://127.0.0.1:9000
-            conf = ConfItem('fs.defaultFS','PORT','hdfs://127.0.0.1:9000')
-            if  not testcase.__contains__(conf):
-                testcase.addConfItem(ConfItem('fs.defaultFS','PORT','hdfs://127.0.0.1:9000'))
-
-        if Configuration.fuzzerConf['project'] == 'hbase':
-            # add hbase.rootdir=/home/hadoop/hbase-2.2.2-work/hbase-tmp
-            conf = ConfItem('hbase.rootdir','DIRPATH','/home/hadoop/hbase-2.2.2-work/hbase-tmp')
-            if  not testcase.__contains__(conf):
-                testcase.addConfItem(ConfItem('hbase.rootdir','DIRPATH','/home/hadoop/hbase-2.2.2-work/hbase-tmp'))
+        self.prepareTestcaseForExecution(testcase)
         
         # update flag
         if ShowStats.mutationStrategy == "SmartMutator":
@@ -159,15 +249,20 @@ class TestValidator(object):
             utRes.writeToFile()
             self.logger.info(">>>>[TestValidator] after write utresult to file")
             self.testcaseNum += UnitTester.cur_unittest_count
-            if utRes.status == 0 and self.unitTester.isNoMappingTests == False:
-                # add if there is no mapping tests for testcase, then go to system test
+            hasMappingTests = self.unitTester.isNoMappingTests == False
+            if self.requireUnitPassForSystemTest == "True":
+                if hasMappingTests == False:
+                    utRes.description = "rejected before system test: no mapped unit tests"
+                    self.logger.info(">>>>[TestValidator] reject system testing because there are no mapped unit tests")
+                    return self.finalize_without_system(testcase, startTime, utRes)
+                if utRes.status != 0:
+                    self.logger.info(">>>>[TestValidator] reject system testing because unit tests failed")
+                    return self.finalize_without_system(testcase, startTime, utRes)
+                self.logger.info(">>>>[TestValidator] unit tests passed; continue to system testing")
+            elif utRes.status == 0 and hasMappingTests:
                 if random.random() > self.forceSystemTestingRatio:
-                    endTime = time.time()
-                    self.totalTime += endTime -startTime
-                    ShowStats.ecFuzzExecSpeed = self.testcaseNum / self.totalTime
-                    return utRes, None, testcase
-                else:
-                    self.logger.info(">>>>[TestValidator] force system testing")
+                    return self.finalize_without_system(testcase, startTime, utRes)
+                self.logger.info(">>>>[TestValidator] force system testing")
         else:
             # testcase.generateFileName()
             self.logger.info(">>>>[TestValidator] skip unit test!")
@@ -194,6 +289,7 @@ class TestValidator(object):
             if self.useMongo == 'True':
                 self.mongoDb.insert_map_to_db("newEastSeed", new_seed_data)
         stRes = self.sysTester.runTest(testcase, stopSoon)
+        self.updateExerciseState(testcase, stRes, bootstrap=False)
         # self.logger.info("testvalidator-73")
         stRes.fileDir = self.fuzzerConf['sys_test_results_dir']
         # self.logger.info("testvalidator-75")
@@ -252,6 +348,17 @@ class TestValidator(object):
         endTime = time.time()
         self.totalTime += endTime - startTime
         ShowStats.ecFuzzExecSpeed = self.testcaseNum / self.totalTime
+        self.paramTraceCollector.record_testcase(
+            testcase,
+            self.unitTester.last_ran_tests,
+            self.unitTester.last_trace_events,
+            self.sysTester.lastTraceEvents,
+            utRes,
+            stRes,
+        )
+        failure_signature, exception_class = self.normalizeFailureSignature(stRes)
+        if failure_signature != "":
+            self.comparisonMetrics.record_failure(testcase, stRes, failure_signature, exception_class)
         # self.logger.info("testvalidator-88")
         return utRes, stRes, testcase
         # return stRes, self.trimmedTestcase

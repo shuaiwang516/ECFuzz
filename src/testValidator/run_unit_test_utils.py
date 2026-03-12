@@ -81,17 +81,14 @@ class run_unit_test_utils(object):
         """
         # return int: tests run count
         # return bool: failed or not (failed means True)
-        res = re.search(r'Tests run:.*Failures:.*Errors:.*Skipped.*Time elapsed', line_info)
+        clean_line = self.strip_ansi(line_info)
+        res = re.search(r'Tests run:\s*(\d+).*Failures:\s*(\d+).*Errors:\s*(\d+).*Skipped.*Time elapsed', clean_line)
         if res:
             # means it has info we want (all needs to be cal)
             try:
-                strs = res.group()
-                failure = strs.find("Failures")
-                errors = strs.find("Errors")
-                skipped = strs.find("Skipped")
-                total_run = int(strs[10: failure-2])
-                fail_num = int(strs[failure + 9: errors-2])
-                error_num = int(strs[errors + 7: skipped-2])
+                total_run = int(res.group(1))
+                fail_num = int(res.group(2))
+                error_num = int(res.group(3))
                 flag = False
                 if fail_num != 0 or error_num != 0:
                     flag = True

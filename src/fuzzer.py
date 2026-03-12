@@ -12,6 +12,7 @@ from testValidator.TestValidator import TestValidator
 from testcaseGenerator.TestcaseGenerator import TestcaseGenerator
 from utils.ConfAnalyzer import ConfAnalyzer
 from utils.Configuration import Configuration
+from utils.ExerciseGuidanceState import ExerciseGuidanceState
 
 from utils.InstanceCreator import InstanceCreator
 from utils.Logger import Logger
@@ -34,6 +35,7 @@ class Fuzzer(object):
         Configuration.parseConfiguration(self.commandConf)
         self.fuzzerConf: Dict[str, str] = Configuration.fuzzerConf
         self.putConf: Dict[str, str] = Configuration.putConf
+        ExerciseGuidanceState.configure_from_current()
         
 
         ShowStats.mutationStrategy = self.fuzzerConf['mutator'].split(".")[-1]
@@ -76,13 +78,14 @@ class Fuzzer(object):
             
     def getOpt(self) -> dict:
         ''' project, seed_pool_selection_ratio, seed_gen_seq_ratio, data_viewer, data_viewer_env, 
-        ctests_trim_sampling,ctests_trim_scale,skip_unit_test,force_system_testing_ratio
+        ctests_trim_sampling,ctests_trim_scale,skip_unit_test,force_system_testing_ratio,
+        require_unit_pass_for_system_test
         host_ip,host_port,run_time(/h)
         '''
         argv = sys.argv[1:]
         res = {}
         try:
-            opts, args = getopt.getopt(argv, "p",["project=","seed_pool_selection_ratio=","seed_gen_seq_ratio=","data_viewer=","data_viewer_env=","ctests_trim_sampling=","ctests_trim_scale=","skip_unit_test=","force_system_testing_ratio=","host_ip=","host_port=","run_time=","mutator=","systemtester=","ctest_total_time=","misconf_mode="])
+            opts, args = getopt.getopt(argv, "p",["project=","seed_pool_selection_ratio=","seed_gen_seq_ratio=","data_viewer=","data_viewer_env=","ctests_trim_sampling=","ctests_trim_scale=","skip_unit_test=","force_system_testing_ratio=","require_unit_pass_for_system_test=","host_ip=","host_port=","run_time=","mutator=","systemtester=","ctest_total_time=","misconf_mode=","fuzzing_loop=","exercise_guided_mutation=","exercise_guided_explore_ratio="])
             # opts, args = getopt.getopt(argv, ["project=","seed_pool_selection_ratio=","seed_gen_seq_ratio=","data_viewer=","data_viewer_env=","ctests_trim_sampling=","ctests_trim_scale=","skip_unit_test=","force_system_testing_ratio="])
         except:
             self.logger.info("Parameter Setting Error")
@@ -105,6 +108,8 @@ class Fuzzer(object):
                 res["skip_unit_test"] = arg
             elif opt in ['--force_system_testing_ratio']:
                 res["force_system_testing_ratio"] = arg
+            elif opt in ['--require_unit_pass_for_system_test']:
+                res["require_unit_pass_for_system_test"] = arg
             elif opt in ['--host_ip']:
                 res["host_ip"] = arg
             elif opt in ['--host_port']:
@@ -119,6 +124,12 @@ class Fuzzer(object):
                 res["ctest_total_time"] = arg
             elif opt in ['--misconf_mode']:
                 res["misconf_mode"] = arg
+            elif opt in ['--fuzzing_loop']:
+                res["fuzzing_loop"] = arg
+            elif opt in ['--exercise_guided_mutation']:
+                res["exercise_guided_mutation"] = arg
+            elif opt in ['--exercise_guided_explore_ratio']:
+                res["exercise_guided_explore_ratio"] = arg
         return res
         # for opt, arg in opts:
         #     if opt in ['--project']:
@@ -167,61 +178,59 @@ class Fuzzer(object):
         self.deleteDir(Configuration.fuzzerConf['sys_testcase_fail_dir'])
 
         # print("\033[37m")
-        if fuzzingLoop > 0:
-            self.logger.info(f"Fuzzer ready to run for {fuzzingLoop} loops...")
-            for _ in range(fuzzingLoop):
-                try:
-                    if (not stopSoon.empty()):
-                        t1.join()
+        try:
+            self.testValidator.runExerciseBootstrap(stopSoon)
+            if fuzzingLoop > 0:
+                self.logger.info(f"Fuzzer ready to run for {fuzzingLoop} loops...")
+                for _ in range(fuzzingLoop):
+                    try:
+                        if (not stopSoon.empty()):
+                            t1.join()
+                            break
+                    except Exception as e:
+                        print(e)
                         break
-                except Exception as e:
-                    print(e)
-                    break
-                try:
-                    self.loop(stopSoon)
-                except Exception as e:
-                    self.logger.info(e)
-                    break
-        else:
-            self.logger.info("Fuzzer ready to run forever...")
-            while True:
-                try:
-                    if not stopSoon.empty():
-                        t1.join()
+                    try:
+                        self.loop(stopSoon)
+                    except Exception as e:
+                        self.logger.info(e)
                         break
-                except Exception as e:
-                    print(e)
-                    break
-                try:
-                    self.loop(stopSoon)
-                except Exception as e:
-                    self.logger.info(e)
-                    break
-        stopSoon.put(True)
-        # write data to db
-        result_data = {}
-        result_data['totalSystemTestFailed'] = ShowStats.totalSystemTestFailed
-        result_data['totalSystemTestFailed_Type1'] = ShowStats.totalSystemTestFailed_Type1
-        result_data['totalSystemTestFailed_Type2'] = ShowStats.totalSystemTestFailed_Type2
-        result_data['totalSystemTestFailed_Type3'] = ShowStats.totalSystemTestFailed_Type3
-        result_data['system_testcase_num'] = ShowStats.totalSystemTestcases
-        if self.testValidator.useMongo == 'True':
-            self.testValidator.mongoDb.insert_result_to_db(result_data)
-            # save exception map
-            self.testValidator.mongoDb.insert_exception_to_db(self.testValidator.sysTester.exceptionMap)
-            self.logger.info(f'map reason is: {self.testValidator.sysTester.exceptionMapReason}')
-            self.testValidator.mongoDb.insert_map_to_db("ExceptionMapReason", self.testValidator.sysTester.exceptionMapReason)
-        # save cov data
-        # self.testValidator.mongoDb.insert_cov_unit_to_db(self.testValidator.covUnitData)
-        # self.testValidator.mongoDb.insert_cov_sys_to_db(self.testValidator.covSysData)
-        # self.testValidator.insert_data(self.testValidator.covUnitData, self.testValidator.covSysData)
-        # delete execs for later test is accurate
-        # self.testValidator.getCov.delete_execs()
-        self.logger.info(f">>>>[fuzzer] hava a good time")
-        print("\033[37m")
-        if self.fuzzerConf['data_viewer'] == 'True':
-            from utils.DataViewer import stopDrawing
-            stopDrawing(self.dataViewer)
+            else:
+                self.logger.info("Fuzzer ready to run forever...")
+                while True:
+                    try:
+                        if not stopSoon.empty():
+                            t1.join()
+                            break
+                    except Exception as e:
+                        print(e)
+                        break
+                    try:
+                        self.loop(stopSoon)
+                    except Exception as e:
+                        self.logger.info(e)
+                        break
+        finally:
+            stopSoon.put(True)
+            # write data to db
+            result_data = {}
+            result_data['totalSystemTestFailed'] = ShowStats.totalSystemTestFailed
+            result_data['totalSystemTestFailed_Type1'] = ShowStats.totalSystemTestFailed_Type1
+            result_data['totalSystemTestFailed_Type2'] = ShowStats.totalSystemTestFailed_Type2
+            result_data['totalSystemTestFailed_Type3'] = ShowStats.totalSystemTestFailed_Type3
+            result_data['system_testcase_num'] = ShowStats.totalSystemTestcases
+            if self.testValidator.useMongo == 'True':
+                self.testValidator.mongoDb.insert_result_to_db(result_data)
+                # save exception map
+                self.testValidator.mongoDb.insert_exception_to_db(self.testValidator.sysTester.exceptionMap)
+                self.logger.info(f'map reason is: {self.testValidator.sysTester.exceptionMapReason}')
+                self.testValidator.mongoDb.insert_map_to_db("ExceptionMapReason", self.testValidator.sysTester.exceptionMapReason)
+            self.testValidator.comparisonMetrics.finalize()
+            self.logger.info(f">>>>[fuzzer] hava a good time")
+            print("\033[37m")
+            if self.fuzzerConf['data_viewer'] == 'True':
+                from utils.DataViewer import stopDrawing
+                stopDrawing(self.dataViewer)
 
     def loop(self, stopSoon: Queue):
         """
@@ -251,9 +260,11 @@ class Fuzzer(object):
             self.logger.info(">>>>[fuzzer] testValidator done")
             if (utResult != None) and (utResult.status == 1) and (sysResult != None) and (sysResult.status == 0):
                 self.seedGenerator.addSeedToPool(trimmedTestcase)
+                ShowStats.acceptedSeedCount += 1
             self.logger.info(">>>>[fuzzer] handle seed done")
             ShowStats.writeToPlotData()
             ShowStats.iterationCounts += 1
+            self.testValidator.comparisonMetrics.record_snapshot()
         ShowStats.loopCounts += 1
         # if ShowStats.loopCounts % 5 == 0:
         #     # gc on each five round

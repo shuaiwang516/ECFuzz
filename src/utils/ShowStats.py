@@ -45,6 +45,7 @@ class ShowStats(object):
 
     #seedGenerator.py
     queueLength: int = 0
+    acceptedSeedCount: int = 0
     #unit test
     # totalUnitTestFailed: int = 0
     #system test

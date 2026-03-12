@@ -19,7 +19,7 @@ class Configuration(object):
     putConf: Dict[str,str]
 
     @staticmethod
-    def parseConfiguration(commandConf: dict) -> None:
+    def parseConfiguration(commandConf: dict = None) -> None:
         """
 
         parse a configuration dictionary from a .conf file.
@@ -30,6 +30,9 @@ class Configuration(object):
         Returns:
             configuration (Dict[str,Dict[str,str]]): the configuration organized as dict
         """
+        if commandConf is None:
+            commandConf = {}
+
         cf = configparser.ConfigParser()
         cf.read(os.path.join(FUZZER_DIR, "fuzzing.conf"), encoding='utf-8')
 

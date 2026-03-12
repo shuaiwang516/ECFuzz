@@ -6,12 +6,14 @@ from dataModel.TestResult import TestResult
 from dataModel.Testcase import Testcase
 from testValidator.Tester import Tester
 from utils.Configuration import Configuration
+from utils.ExerciseGuidanceState import ExerciseGuidanceState
 from utils.Logger import getLogger
 from utils.ShowStats import ShowStats
 from utils.ConfAnalyzer import ConfAnalyzer
 from queue import Queue
 from testValidator.MonitorThread import MonitorThread
 from utils.UnitConstant import DATA_DIR
+from utils.ParamTraceCollector import ParamTraceCollector
 
 class SystemTester(Tester):
     """
@@ -37,6 +39,8 @@ class SystemTester(Tester):
             "alluxio": os.path.join(DATA_DIR, "app_sysTest/alluxio-2.1.0-work/logs"),
             "zookeeper": os.path.join(DATA_DIR, "app_sysTest/zookeeper-3.5.6-work/logs")
         }
+        self.lastTraceEvents = []
+        self.lastExercisedConfNames = []
 
     def replaceConfig(self, testcase: Testcase):
         srcReplacePath = testcase.filePath
@@ -45,33 +49,77 @@ class SystemTester(Tester):
         self.logger.info(
             f">>>>[systest] {srcReplacePath} replacement to the corresponding configuration file:{dstReplacePath}")
 
-    def runSystemTestUtils(self, testcase: Testcase, logDir: str, stopSoon: Queue) -> TestResult:
+    def _build_system_env(self):
+        env = os.environ.copy()
+        env["ECFUZZ_COLLECT_EXERCISED_PARAMS"] = "true"
+        env["ECFUZZ_EXERCISE_GUIDED_MUTATION"] = "true" if ExerciseGuidanceState.is_enabled() else "false"
+        return env
+
+    def runSystemTestUtils(self, testcase: Testcase, logDir: str, stopSoon: Queue, recordStats: bool = True) -> TestResult:
         Result = TestResult()
         # Result.count -= 1
         # if self.project == "alluxio":
         #     sysChmod = "echo kb310 | sudo -S chmod -R 777 /home/hadoop/ecfuzz/data/app_sysTest/alluxio-2.1.0-work/underFSStorage"
         #     process = subprocess.run(sysChmod, shell=True, stdout=PIPE, stderr=PIPE, universal_newlines=True) 
-        sysCmd = f"cd {Configuration.putConf['systest_shell_dir']} && {Configuration.putConf['systest_java']} {Configuration.putConf['systest_shell']}"
+        systestShellDir = Configuration.putConf['systest_shell_dir']
+        sysCmd = f"cd {systestShellDir} && {Configuration.putConf['systest_java']} {Configuration.putConf['systest_shell']}"
         self.logger.info(f">>>>[systest] {self.project} is undergoing system test validation...")
         sysStartTime = time.time()
         stop = Queue()
         threading.Thread(target=MonitorThread.threadMonitor, args=[stop, logDir, stopSoon]).start()
-        process = subprocess.run(sysCmd, shell=True, stdout=PIPE, stderr=PIPE, universal_newlines=True)
+        shellFileState = ParamTraceCollector.snapshot_file_state(systestShellDir)
+        process = subprocess.run(
+            sysCmd,
+            shell=True,
+            stdout=PIPE,
+            stderr=PIPE,
+            universal_newlines=True,
+            env=self._build_system_env(),
+        )
         Result.status = process.returncode
         sysEndTime = time.time()
         stop.put(1)
+        self.lastTraceEvents = []
+        self.lastExercisedConfNames = []
+        self.lastTraceEvents.extend(
+            ParamTraceCollector.parse_events_from_text(
+                process.stdout,
+                source="system-stdout",
+                extra={"project": self.project},
+            )
+        )
+        self.lastTraceEvents.extend(
+            ParamTraceCollector.parse_events_from_text(
+                process.stderr,
+                source="system-stderr",
+                extra={"project": self.project},
+            )
+        )
+        self.lastTraceEvents.extend(ParamTraceCollector.extract_events_from_log_dir(logDir))
+        self.lastTraceEvents.extend(
+            ParamTraceCollector.extract_events_from_updated_files(
+                systestShellDir,
+                shellFileState,
+                source="system-shell",
+            )
+        )
+        self.lastExercisedConfNames = ParamTraceCollector.extract_exercised_names(self.lastTraceEvents)
 
         onceSysTime = sysEndTime - sysStartTime
-        self.totalTime += onceSysTime
-        self.totalCount += 1
+        if recordStats:
+            self.totalTime += onceSysTime
+            self.totalCount += 1
 
-        ShowStats.averageSystemTestTime = self.totalTime / self.totalCount
-        ShowStats.systemTestExecSpeed = self.totalCount / self.totalTime
-        ShowStats.totalSystemTestcases = self.totalCount
-        ShowStats.longgestSystemTestTime = max(ShowStats.longgestSystemTestTime, onceSysTime)
+            ShowStats.averageSystemTestTime = self.totalTime / self.totalCount
+            ShowStats.systemTestExecSpeed = self.totalCount / self.totalTime
+            ShowStats.totalSystemTestcases = self.totalCount
+            ShowStats.longgestSystemTestTime = max(ShowStats.longgestSystemTestTime, onceSysTime)
 
         self.logger.info(
             f">>>>[systest] The return code of {testcase.filePath} system test verification is {Result.status}.")
+        self.logger.info(
+            f">>>>[systest] exercised params observed in this run: {len(self.lastExercisedConfNames)}"
+        )
         if Result.status != 0:
             ShowStats.lastNewFailSystemTest = 0.0
             self.preFindTime = sysEndTime
@@ -161,12 +209,14 @@ class SystemTester(Tester):
                 os.chmod(directory, stat.S_IWRITE)
             shutil.rmtree(directory) 
 
-    def runTest(self, testcase: Testcase, stopSoon) -> TestResult:
+    def runTest(self, testcase: Testcase, stopSoon, recordStats: bool = True) -> TestResult:
         # if Configuration.fuzzerConf['project'] == 'hbase':
         #     self.deleteDir("/home/hadoop/ecfuzz/data/app_sysTest/hbase-2.2.2-work/logs")
         logLoc = self.logLocation[Configuration.fuzzerConf["project"]]
+        self.lastTraceEvents = []
+        self.lastExercisedConfNames = []
         self.deleteDir(logLoc)
         self.replaceConfig(testcase)
-        Result = self.runSystemTestUtils(testcase, logLoc, stopSoon)
+        Result = self.runSystemTestUtils(testcase, logLoc, stopSoon, recordStats=recordStats)
         return Result
     

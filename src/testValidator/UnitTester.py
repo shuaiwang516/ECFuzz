@@ -15,6 +15,7 @@ from utils.TimeFilterTrimmer import TimeFilterTrimmer
 from utils.ConfAnalyzer import ConfAnalyzer
 from utils.Configuration import Configuration
 from utils.Logger import Logger, getLogger
+from utils.ParamTraceCollector import ParamTraceCollector
 from utils.ShowStats import ShowStats
 from utils.UnitConstant import FUZZER_DIR
 
@@ -36,6 +37,92 @@ class UnitTester(Tester):
         self.total_count: int = 0 # it equals to the testcases' number
         # unittest time info
         self.unitTestTimeMap = self.TimeFilterTrimmer.data
+        self.last_ran_tests = set()
+        self.last_trace_events = []
+        self.last_associated_tests = set()
+        self.isNoMappingTests = False
+
+    def estimate_timeout(self, associated_tests) -> float:
+        max_time = -1.0
+        known_total = 0.0
+        known_count = 0
+        for test in associated_tests:
+            if test in self.unitTestTimeMap:
+                value = float(self.unitTestTimeMap[test])
+                max_time = max(max_time, value)
+                known_total += value
+                known_count += 1
+
+        missing_count = len(associated_tests) - known_count
+        if known_total > 0:
+            total_budget = known_total * 3.0
+            if max_time > 0:
+                total_budget = max(total_budget, max_time * len(associated_tests) * 2.0)
+            total_budget += 30 * missing_count
+        else:
+            total_budget = 50 * len(associated_tests)
+
+        return total_budget + 120
+
+    def resolve_associated_tests(self, testcase: Testcase):
+        test_input = self.unitUtils.extract_conf_diff(testcase)
+        if getattr(testcase, "mutatedConfNames", None):
+            testcase_value_map = {conf.name: conf.value for conf in testcase.confItemList}
+            selected_input = {
+                name: testcase_value_map[name]
+                for name in testcase.mutatedConfNames
+                if name in testcase_value_map
+            }
+            self.logger.info(
+                f">>>>[UnitTester] using testcase mutation metadata for unit-test selection: "
+                f"{','.join(selected_input.keys())}"
+            )
+        else:
+            selected_input = test_input
+            self.logger.info(">>>>[UnitTester] testcase mutation metadata missing; fallback to full conf diff")
+        params = selected_input.keys()
+        associated_test_map, associated_tests = {}, []
+        for p in params:
+            if p in ConfAnalyzer.confUnitMap:
+                tests = ConfAnalyzer.confUnitMap[p]
+                self.logger.info(f">>>>[UnitTester] parameter {p} has {len(tests)} tests")
+                associated_test_map[p] = tests
+            else:
+                self.logger.info(f">>>>[UnitTester] parameter {p} has 0 tests")
+
+        associated_test_map = self.SampleTrimmer.trimCtests(associated_test_map)
+        associated_test_map = self.TimeFilterTrimmer.trimCtests(associated_test_map, self.unitTestTimeMap)
+        for _, ts in associated_test_map.items():
+            associated_tests += ts
+        associated_tests = set(associated_tests)
+        self.last_associated_tests = associated_tests
+        self.isNoMappingTests = len(associated_tests) == 0
+
+        self.logger.info(f">>>>[UnitTester] # parameters associated with the run: {len(params)}")
+        self.logger.info(f">>>>[UnitTester] # ctests to run in total: {len(associated_tests)}")
+        return selected_input, associated_test_map, associated_tests
+
+    def collect_trace_events(self, associated_tests) -> None:
+        observed_tests = set()
+        trace_events = []
+        for clsname, methods in self.rutils.group_test_by_cls(associated_tests).items():
+            observed, events = ParamTraceCollector.extract_events_from_surefire(
+                Configuration.putConf['surefire_location'],
+                clsname,
+                methods,
+            )
+            observed_tests.update(observed)
+            trace_events.extend(events)
+        self.last_ran_tests = observed_tests
+        self.last_trace_events = trace_events
+
+    @staticmethod
+    def kill_process_group(process) -> bool:
+        try:
+            os.killpg(os.getpgid(process.pid), 9)
+            return True
+        except ProcessLookupError:
+            return False
 
     def run_test_batch(self, param_values, associated_test_map):
         self.logger.info(f">>>>[UnitTester] start running ctests for {len(associated_test_map)} parameters")
@@ -49,6 +136,8 @@ class UnitTester(Tester):
 
         start_time = time.time()
         tr = unit_result(ran_tests_and_time=set(), failed_tests=set())
+        trace_tests = set()
+        trace_events = []
         for index, group in enumerate(param_test_group):
             # do injection for different test group and chdir for testing everytime
             tested_params, tests = group
@@ -90,6 +179,13 @@ class UnitTester(Tester):
             test_by_cls = self.rutils.group_test_by_cls(tests)
             for clsname, methods in test_by_cls.items():
                 times, errors = self.unitUtils.parse_surefire(clsname, methods)
+                observed, events = ParamTraceCollector.extract_events_from_surefire(
+                    Configuration.putConf['surefire_location'],
+                    clsname,
+                    methods,
+                )
+                trace_tests.update(observed)
+                trace_events.extend(events)
                 for m in methods:
                     if m in times:
                         tr.ran_tests_and_time.add(f"{clsname}#{m}" + "\t" + times[m])
@@ -107,6 +203,8 @@ class UnitTester(Tester):
         self.unitUtils.clean_config()
         # sort the time
         self.unitTestTimeMap = dict(sorted(self.unitTestTimeMap.items(), key=operator.itemgetter(1)))
+        self.last_ran_tests = trace_tests
+        self.last_trace_events = trace_events
         return tr
 
     def test_conf_file(self, testcase: Testcase) -> TestResult:
@@ -115,27 +213,7 @@ class UnitTester(Tester):
         # every loop, it needs to create a new TestResult
         unit_start_time = time.time()
         unitResult = TestResult()
-        test_input = self.unitUtils.extract_conf_diff(testcase)
-        params = test_input.keys()
-        associated_test_map, associated_tests = {}, []
-        for p in params:
-            if p in ConfAnalyzer.confUnitMap:
-                tests = ConfAnalyzer.confUnitMap[p]
-                self.logger.info(f">>>>[UnitTester] parameter {p} has {len(tests)} tests")
-                associated_test_map[p] = tests
-                # associated_tests = associated_tests + tests
-            else:
-                self.logger.info(f">>>>[UnitTester] parameter {p} has 0 tests")
-        # associated_tests = set(associated_tests)
-        # trim ctests
-        associated_test_map = self.SampleTrimmer.trimCtests(associated_test_map)
-        associated_test_map = self.TimeFilterTrimmer.trimCtests(associated_test_map, self.unitTestTimeMap)
-        for conf, ts in associated_test_map.items():
-            associated_tests += ts
-        associated_tests = set(associated_tests)
-        self.logger.info(f">>>>[UnitTester] # parameters associated with the run: {len(params)}")
-
-        self.logger.info(f">>>>[UnitTester] # ctests to run in total: {len(associated_tests)}")
+        test_input, associated_test_map, associated_tests = self.resolve_associated_tests(testcase)
 
         if associated_tests:
             tr = self.run_test_batch(test_input, associated_test_map)
@@ -153,6 +231,8 @@ class UnitTester(Tester):
         else:
             self.logger.info(">>>>[UnitTester] no ctest failed for changed params in conf file")
             # return for test cout is zero
+            UnitTester.cur_unittest_count = 0
+            unitResult.description = "no mapped unit tests"
             return unitResult
         
         unit_end_time = time.time()
@@ -191,37 +271,14 @@ class UnitTester(Tester):
         
         unit_start_time = time.time()
         unitResult = TestResult()
-        test_input = self.unitUtils.extract_conf_diff(testcase)
-        params = test_input.keys()
-        associated_test_map, associated_tests = {}, []
-        for p in params:
-            if p in ConfAnalyzer.confUnitMap:
-                tests = ConfAnalyzer.confUnitMap[p]
-                self.logger.info(f">>>>[UnitTester] parameter {p} has {len(tests)} tests")
-                associated_test_map[p] = tests
-                # associated_tests = associated_tests + tests
-            else:
-                self.logger.info(f">>>>[UnitTester] parameter {p} has 0 tests")
-        # associated_tests = set(associated_tests)
-        # trim ctests
-        associated_test_map = self.SampleTrimmer.trimCtests(associated_test_map)
-        associated_test_map = self.TimeFilterTrimmer.trimCtests(associated_test_map, self.unitTestTimeMap)
-        for _, ts in associated_test_map.items():
-            associated_tests += ts
-        associated_tests = set(associated_tests)
-        self.logger.info(f">>>>[UnitTester] # parameters associated with the run: {len(params)}")
-
-        self.logger.info(f">>>>[UnitTester] # ctests to run in total: {len(associated_tests)}")
+        test_input, _, associated_tests = self.resolve_associated_tests(testcase)
         # cal the timeout
-        timeout = -1
-        for test in associated_tests:
-            if test in self.unitTestTimeMap:
-                timeout = max(timeout, self.unitTestTimeMap[test])
-        timeout = timeout * len(tests) * 1.5 if timeout != -1 else 50 * len(tests)
-        timeout = timeout + 60
+        timeout = self.estimate_timeout(associated_tests)
         ShowStats.unitCmdTimeout = int(timeout)
 
         if not associated_tests:
+            UnitTester.cur_unittest_count = 0
+            unitResult.description = "no mapped unit tests"
             return unitResult
         # inject key,value to file
         self.unitUtils.inject_config(test_input)
@@ -236,9 +293,9 @@ class UnitTester(Tester):
             mvn_str = "mvn test -Dtest={}"
         if Configuration.fuzzerConf['project'] == "alluxio":
             if Configuration.fuzzerConf['use_surefire'] == "True":
-                mvn_str = "mvn license:format surefire:test -Dtest={} -DfailIfNoTests=false -Dcheckstyle.skip -Dlicense.skip -Dfindbugs.skip -Dmaven.javadoc.skip=true"
+                mvn_str = "mvn surefire:test -Dtest={} -DfailIfNoTests=false -Dcheckstyle.skip -Dlicense.skip -Dfindbugs.skip -Dmaven.javadoc.skip=true"
             else :
-                mvn_str = "mvn license:format test -Dtest={} -DfailIfNoTests=false -Dcheckstyle.skip -Dlicense.skip -Dfindbugs.skip -Dmaven.javadoc.skip=true"
+                mvn_str = "mvn test -Dtest={} -DfailIfNoTests=false -Dcheckstyle.skip -Dlicense.skip -Dfindbugs.skip -Dmaven.javadoc.skip=true"
         # all_tests = list(associated_tests)
         all_tests = self.rutils.split_tests_by_cls(associated_tests)
         popen_list = []
@@ -296,6 +353,7 @@ class UnitTester(Tester):
         parse_out_end_time = time.time()
         self.logger.info(f">>>>[UnitTester] this round for parse output time is : {parse_out_end_time - parse_out_start_time}")
         self.unitUtils.clean_config()
+        self.collect_trace_events(associated_tests)
         # change to origin dir
         os.chdir(Configuration.putConf['run_unit_dir'])
         self.logger.info(f">>>>[UnitTester] change to origin dir : {Configuration.putConf['run_unit_dir']}")
@@ -345,39 +403,16 @@ class UnitTester(Tester):
         
         unit_start_time = time.time()
         unitResult = TestResult()
-        test_input = self.unitUtils.extract_conf_diff(testcase)
-        params = test_input.keys()
-        associated_test_map, associated_tests = {}, []
-        for p in params:
-            if p in ConfAnalyzer.confUnitMap:
-                tests = ConfAnalyzer.confUnitMap[p]
-                self.logger.info(f">>>>[UnitTester] parameter {p} has {len(tests)} tests")
-                associated_test_map[p] = tests
-                # associated_tests = associated_tests + tests
-            else:
-                self.logger.info(f">>>>[UnitTester] parameter {p} has 0 tests")
-        # associated_tests = set(associated_tests)
-        # trim ctests
-        associated_test_map = self.SampleTrimmer.trimCtests(associated_test_map)
-        associated_test_map = self.TimeFilterTrimmer.trimCtests(associated_test_map, self.unitTestTimeMap)
-        for _, ts in associated_test_map.items():
-            associated_tests += ts
-        associated_tests = set(associated_tests)
-        self.logger.info(f">>>>[UnitTester] # parameters associated with the run: {len(params)}")
-
-        self.logger.info(f">>>>[UnitTester] # ctests to run in total: {len(associated_tests)}")
+        test_input, _, associated_tests = self.resolve_associated_tests(testcase)
         # cal the timeout
-        timeout = -1
-        for test in associated_tests:
-            if test in self.unitTestTimeMap:
-                timeout = max(timeout, self.unitTestTimeMap[test])
-        timeout = timeout * len(associated_tests) * 1.5 if timeout != -1 else 50 * len(associated_tests)
-        timeout = timeout + 60
+        timeout = self.estimate_timeout(associated_tests)
         ShowStats.unitCmdTimeout = int(timeout)
 
         if not associated_tests:
             # return empty result
             self.logger.info(">>>>[UnitTester] no tests for cur input testcase")
+            UnitTester.cur_unittest_count = 0
+            unitResult.description = "no mapped unit tests"
             return unitResult
         # inject key,value to file
         self.unitUtils.inject_config(test_input)
@@ -398,10 +433,7 @@ class UnitTester(Tester):
         # self.logger.info(f">>>>[UnitTester] mvn_str is : {mvn_str}")
         test_str = self.rutils.cal_strs(all_tests)
         
-        if Configuration.fuzzerConf['project'] == "alluxio":
-            mvn_cmd = ["mvn", "license:format" ,test_mode, "-Dtest={}".format(test_str)] + maven_args
-        else:
-            mvn_cmd = ["mvn" ,test_mode, "-Dtest={}".format(test_str)] + maven_args
+        mvn_cmd = ["mvn" ,test_mode, "-Dtest={}".format(test_str)] + maven_args
         
         # mvn_str = mvn_str.format(test_str)
         self.logger.info(">>>>[UnitTester] start to run by pre kill")
@@ -424,33 +456,74 @@ class UnitTester(Tester):
         total_time = int(timeout)
         self.logger.info(f">>>>[UnitTester] timeout is : {int(timeout)}")
         s_time = time.time()
+        last_progress_time = s_time
+        idle_timeout = int(timeout)
+        hard_timeout = max(int(timeout * 4), idle_timeout + 300)
         with open(outfile, "r") as file:
             while (1):
                 # each sec to check the outfile
                 time.sleep(0.1)
                 # total_time -= 1
-                if int(time.time() - s_time) >= total_time:
+                elapsed_total = int(time.time() - s_time)
+                elapsed_idle = int(time.time() - last_progress_time)
+                if elapsed_total >= hard_timeout:
                     # here it's running time is over timeout
-                    # process.kill()
-                    os.killpg(os.getpgid(process.pid), 9)
-                    unitResult.status = 1
-                    unitResult.description = "killed by timeout"
-                    cur_total_unit_test += 1
-                    self.logger.info(">>>>[UnitTester] kill process by timeout")
+                    code = process.poll()
+                    if code is None:
+                        self.kill_process_group(process)
+                        unitResult.status = 1
+                        unitResult.description = "killed by hard timeout"
+                        cur_total_unit_test += 1
+                        self.logger.info(">>>>[UnitTester] kill process by hard timeout")
+                    elif code == 0:
+                        unitResult.status = 0
+                        unitResult.description = "normally terminate"
+                        self.logger.info(">>>>[UnitTester] process finished before hard-timeout kill")
+                    else:
+                        unitResult.status = 1
+                        unitResult.description = f"terminated with code {code}"
+                        self.logger.info(f">>>>[UnitTester] process already exited with code {code} at hard-timeout check")
+                    break
+                if elapsed_idle >= idle_timeout:
+                    code = process.poll()
+                    if code is None:
+                        self.kill_process_group(process)
+                        unitResult.status = 1
+                        unitResult.description = "killed by timeout"
+                        cur_total_unit_test += 1
+                        self.logger.info(">>>>[UnitTester] kill process by idle timeout")
+                    elif code == 0:
+                        unitResult.status = 0
+                        unitResult.description = "normally terminate"
+                        self.logger.info(">>>>[UnitTester] process finished before idle-timeout kill")
+                    else:
+                        unitResult.status = 1
+                        unitResult.description = f"terminated with code {code}"
+                        self.logger.info(f">>>>[UnitTester] process already exited with code {code} at idle-timeout check")
                     break
                 line_info = file.readline()
                 # self.logger.info(f">>>>[UnitTester] line info is : {line_info}")
                 if line_info:
+                    last_progress_time = time.time()
                     # self.logger.info(f">>>>[UnitTester] line info is : {line_info}")
                     # deal the line info : str
                     round_count, is_failed = self.rutils.deal_line_info(line_info=line_info)
                     if is_failed:
-                        # process.kill()
-                        os.killpg(os.getpgid(process.pid), 9)
-                        unitResult.status = 1
-                        unitResult.description = "killed by pre"
+                        code = process.poll()
+                        if code is None:
+                            self.kill_process_group(process)
+                            unitResult.status = 1
+                            unitResult.description = "killed by pre"
+                            self.logger.info(">>>>[UnitTester] kill process by pre")
+                        elif code == 0:
+                            unitResult.status = 0
+                            unitResult.description = "normally terminate"
+                            self.logger.info(">>>>[UnitTester] process already finished before pre kill")
+                        else:
+                            unitResult.status = 1
+                            unitResult.description = f"terminated with code {code}"
+                            self.logger.info(f">>>>[UnitTester] process already exited with code {code} before pre kill")
                         cur_total_unit_test += round_count
-                        self.logger.info(">>>>[UnitTester] kill process by pre")
                         break
                     else:
                         # no falied 
@@ -475,15 +548,25 @@ class UnitTester(Tester):
                         self.logger.info(">>>>[UnitTester] process has be killed by -9")
                         break
                     else:
-                        continue
+                        unitResult.status = 1
+                        unitResult.description = f"terminated with code {code}"
+                        self.logger.info(f">>>>[UnitTester] process terminated with unexpected code {code}")
+                        break
                     
         self.logger.info(f">>>>[UnitTester] this testcase's unittests count is : {cur_total_unit_test}")
         self.logger.info(">>>>[UnitTester] run by pre kill done")               
         self.unitUtils.clean_config()
         outfd.close()
+        self.collect_trace_events(associated_tests)
         # change to origin dir
         os.chdir(Configuration.putConf['run_unit_dir'])
         self.logger.info(f">>>>[UnitTester] change to origin dir : {Configuration.putConf['run_unit_dir']}")
+
+        if cur_total_unit_test == 0 and associated_tests:
+            cur_total_unit_test = len(self.last_ran_tests) if self.last_ran_tests else len(associated_tests)
+            self.logger.info(
+                f">>>>[UnitTester] recover unit test count as {cur_total_unit_test} because pre-kill parsing returned zero"
+            )
         
         UnitTester.cur_unittest_count = cur_total_unit_test
 
@@ -500,11 +583,12 @@ class UnitTester(Tester):
         # self.total_count += 1
 
         ShowStats.totalRunUnitTestsCount += cur_total_unit_test
-        ShowStats.averageUnitTestTime = self.total_time / ShowStats.totalRunUnitTestsCount
+        if ShowStats.totalRunUnitTestsCount > 0:
+            ShowStats.averageUnitTestTime = self.total_time / ShowStats.totalRunUnitTestsCount
         # ShowStats.totalUnitTestFailed += unitResult.failed_tests_count
 
         # ShowStats.totalUnitTestcases = self.total_count
-        ShowStats.unitTestExecSpeed = ShowStats.totalRunUnitTestsCount / self.total_time
+        ShowStats.unitTestExecSpeed = ShowStats.totalRunUnitTestsCount / self.total_time if self.total_time else 0
         self.logger.info(f">>>>[UnitTester] status is : {unitResult.status}")
         # sort the time
         # self.unitTestTimeMap = dict(sorted(self.unitTestTimeMap.items(), key=operator.itemgetter(1)))
@@ -522,6 +606,11 @@ class UnitTester(Tester):
         """
         # when running a new testcase, it should create a new UnitTester instance to reset it's attribute
         # rewrite runTest
+        UnitTester.cur_unittest_count = 0
+        self.last_ran_tests = set()
+        self.last_trace_events = []
+        self.last_associated_tests = set()
+        self.isNoMappingTests = False
         surefire_reports = Configuration.putConf['surefire_location']
         # clean the surefire-reports
         for surefire_dir in surefire_reports:

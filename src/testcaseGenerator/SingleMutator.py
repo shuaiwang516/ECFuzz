@@ -58,7 +58,8 @@ class SingleMutator(Mutator):
 
         """
         testcase = Testcase()
-        choose_conf_index = random.randint(0, len(seed.confItemList) - 1)
+        choose_conf_index, candidate_source = self.choose_candidate_index(seed)
+        testcase.mutationCandidateSource = candidate_source
         itemB_dict = {}
         
         dependency = ConfAnalyzer.confItemRelations
@@ -103,4 +104,5 @@ class SingleMutator(Mutator):
         
         for index in itemB_dict:
             testcase.confItemList[index] = itemB_dict[index]
+        testcase.captureMutationFromSeed(seed)
         return testcase

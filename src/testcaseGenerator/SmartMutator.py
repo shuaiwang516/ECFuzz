@@ -55,13 +55,15 @@ class SmartMutator(Mutator):
         else:
             pass
         item_dict = {}
+        _, candidate_source = self.get_candidate_indices(seed)
+        testcase.mutationCandidateSource = candidate_source
         
         dependency = ConfAnalyzer.confItemRelations
         newValue = NewValue()
         # index_list = random.sample(range(0, len(seed.confItemList)), mutate_num)
 
         for times in range(0, mutate_num):
-            choose_conf_index = random.randint(0, len(seed.confItemList) - 1)
+            choose_conf_index, _ = self.choose_candidate_index(seed)
             conf = seed.confItemList[choose_conf_index]
             itemA = ConfItem()
             itemA.name = conf.name
@@ -100,6 +102,7 @@ class SmartMutator(Mutator):
                 testcase.confItemList.append(item_dict[index])
             else:
                 testcase.confItemList.append(seed.confItemList[index])
+        testcase.captureMutationFromSeed(seed)
         return testcase
 
 

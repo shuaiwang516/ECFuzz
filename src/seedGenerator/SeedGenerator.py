@@ -7,6 +7,7 @@ from dataModel.ConfItem import ConfItem
 from dataModel.Seed import Seed
 from utils.ConfAnalyzer import ConfAnalyzer
 from utils.Configuration import Configuration
+from utils.ExerciseGuidanceState import ExerciseGuidanceState
 from utils.Logger import getLogger
 from utils.ShowStats import ShowStats
 
@@ -74,11 +75,18 @@ class SeedGenerator(object):
         else:  
             self.logger.info("Try creating a Seed...")
             confItemList = copy.deepcopy(self.confItemMutable)
+            confItemList, candidate_source = ExerciseGuidanceState.choose_candidate_names(confItemList)
+            self.logger.info(f">>>>[SeedGenerator] candidate source is {candidate_source} with {len(confItemList)} names")
             # k = random.randint(1, confItemList.__len__())
             if Configuration.fuzzerConf['mutator'].split(".")[-1] == "SingleMutator":
                 k = 1
             else:
                 k = random.randint(3, 6)
+            k = min(k, len(confItemList)) if confItemList else 0
+
+            if k == 0:
+                confItemList = copy.deepcopy(self.confItemMutable)
+                k = 1 if Configuration.fuzzerConf['mutator'].split(".")[-1] == "SingleMutator" else min(3, len(confItemList))
 
             if random.random() > float(Configuration.fuzzerConf['seed_gen_seq_ratio']):
                 random.shuffle(confItemList)
@@ -107,6 +115,7 @@ class SeedGenerator(object):
                             for name in confItemList]
 
             self.lastGeneratedSeed = Seed(confItemList)
+            self.lastGeneratedSeed.exerciseWorkloadSignature = ExerciseGuidanceState.workloadSignature
             # self.addSeedToPool(self.lastGeneratedSeed)
 
         return self.lastGeneratedSeed

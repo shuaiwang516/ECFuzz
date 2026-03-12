@@ -19,6 +19,8 @@ class Seed(CounterWriteToFileInterface):
         super().__init__()
         self.confItemList: List[ConfItem] = confItems
         self._noneConfItem = ConfItem()
+        self.lastExercisedConfNames: List[str] = []
+        self.exerciseWorkloadSignature: str = ""
 
     def __getitem__(self, idx: int) -> ConfItem:
         if idx >= self.confItemList.__len__():

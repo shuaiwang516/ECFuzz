@@ -1,0 +1,17 @@
+FROM ecfuzz-param-tracked
+
+USER root
+
+COPY --chown=hadoop:hadoop src/fuzzer.py /home/hadoop/ecfuzz/src/fuzzer.py
+COPY --chown=hadoop:hadoop src/dataModel/Testcase.py /home/hadoop/ecfuzz/src/dataModel/Testcase.py
+COPY --chown=hadoop:hadoop src/testcaseGenerator/CeitMutator.py /home/hadoop/ecfuzz/src/testcaseGenerator/CeitMutator.py
+COPY --chown=hadoop:hadoop src/testcaseGenerator/SingleMutator.py /home/hadoop/ecfuzz/src/testcaseGenerator/SingleMutator.py
+COPY --chown=hadoop:hadoop src/testcaseGenerator/SmartMutator.py /home/hadoop/ecfuzz/src/testcaseGenerator/SmartMutator.py
+COPY --chown=hadoop:hadoop src/testcaseGenerator/StackedMutator.py /home/hadoop/ecfuzz/src/testcaseGenerator/StackedMutator.py
+COPY --chown=hadoop:hadoop src/testValidator/UnitTester.py /home/hadoop/ecfuzz/src/testValidator/UnitTester.py
+COPY --chown=hadoop:hadoop src/testValidator/SystemTester.py /home/hadoop/ecfuzz/src/testValidator/SystemTester.py
+COPY --chown=hadoop:hadoop src/testValidator/TestValidator.py /home/hadoop/ecfuzz/src/testValidator/TestValidator.py
+COPY --chown=hadoop:hadoop src/testValidator/run_unit_test_utils.py /home/hadoop/ecfuzz/src/testValidator/run_unit_test_utils.py
+COPY --chown=hadoop:hadoop src/utils/ParamTraceCollector.py /home/hadoop/ecfuzz/src/utils/ParamTraceCollector.py
+
+USER hadoop
