@@ -124,10 +124,39 @@ public class QuorumPeerConfig {
     }
 
     private static void logAccess(String name) {
+        logAccess(name, true);
+    }
+
+    private static void logAccess(String name, boolean noteProvenance) {
         if (!shouldCollectExercised()) {
             return;
         }
         LOG.warn("[CTEST][EXERCISED-PARAM] name=" + name);
+        if (noteProvenance) {
+            noteProvenanceGet(name);
+        }
+    }
+
+    private static volatile java.lang.reflect.Method provenanceNoteMethod;
+
+    private static void noteProvenanceGet(String name) {
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+        try {
+            java.lang.reflect.Method method = provenanceNoteMethod;
+            if (method == null) {
+                ClassLoader runtimeLoader = ClassLoader.getSystemClassLoader();
+                Class<?> runtimeClass =
+                    runtimeLoader == null
+                        ? Class.forName("ecfuzz.agent.runtime.TraceRuntime")
+                        : Class.forName("ecfuzz.agent.runtime.TraceRuntime", true, runtimeLoader);
+                method = runtimeClass.getMethod("noteConfigGet", String.class);
+                provenanceNoteMethod = method;
+            }
+            method.invoke(null, name);
+        } catch (Throwable ignored) {
+        }
     }
 
     @SuppressWarnings("serial")
@@ -876,7 +905,7 @@ public class QuorumPeerConfig {
     }
     
     public static void setStandaloneEnabled(boolean enabled) {
-        logAccess("standaloneEnabled");
+        logAccess("standaloneEnabled", false);
         standaloneEnabled = enabled;
     }
 
@@ -890,7 +919,7 @@ public class QuorumPeerConfig {
     }
 
     public static void setReconfigEnabled(boolean enabled) {
-        logAccess("reconfigEnabled");
+        logAccess("reconfigEnabled", false);
         reconfigEnabled = enabled;
     }
 

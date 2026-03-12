@@ -15,6 +15,7 @@ from dataModel.Testcase import Testcase
 from utils.ComparisonMetricsRecorder import ComparisonMetricsRecorder
 from utils.Configuration import Configuration
 from utils.ExerciseGuidanceState import ExerciseGuidanceState
+from utils.ProvenanceTrackingState import ProvenanceTrackingState
 from utils.ShowStats import ShowStats
 
 
@@ -40,12 +41,15 @@ class TestComparisonMetricsRecorder(unittest.TestCase):
         ShowStats.averageSystemTestTime = 2.5
         ShowStats.ecFuzzExecSpeed = 0.5
         ExerciseGuidanceState.configure_from_current()
+        ProvenanceTrackingState.configure_from_current()
 
     def test_recorder_writes_snapshot_events_and_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             Configuration.fuzzerConf["comparison_metrics_dir"] = tmpdir
             Configuration.fuzzerConf["exercise_guided_mutation"] = "True"
+            Configuration.fuzzerConf["use_provenance_agent"] = "True"
             ExerciseGuidanceState.configure_from_current()
+            ProvenanceTrackingState.configure_from_current()
             recorder = ComparisonMetricsRecorder()
             testcase = Testcase()
             testcase.fileName = "Testcase-1"
@@ -53,7 +57,9 @@ class TestComparisonMetricsRecorder(unittest.TestCase):
             testcase.mutationCandidateSource = "project-global"
 
             ExerciseGuidanceState.projectGlobalExercisedParams = {"dfs.replication"}
+            ProvenanceTrackingState.projectGlobalUseBackedParams = {"dfs.replication"}
             recorder.record_exercised_discovery(testcase, "dfs.replication")
+            recorder.record_use_backed_discovery(testcase, "dfs.replication")
             recorder.record_failure(
                 testcase,
                 TestResult(status=1, sysFailType=2),
@@ -71,8 +77,10 @@ class TestComparisonMetricsRecorder(unittest.TestCase):
                 summary = json.load(fd)
 
             self.assertEqual(1, summary["distinct_exercised_params_cumulative"])
+            self.assertEqual(1, summary["distinct_use_backed_params_cumulative"])
             self.assertEqual(2, summary["total_failures"])
             self.assertIsNotNone(summary["time_to_first_exercised_param"])
+            self.assertIsNotNone(summary["time_to_first_use_backed_exercised_param"])
             self.assertIsNotNone(summary["time_to_first_failure"])
 
 

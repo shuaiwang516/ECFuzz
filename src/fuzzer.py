@@ -13,6 +13,7 @@ from testcaseGenerator.TestcaseGenerator import TestcaseGenerator
 from utils.ConfAnalyzer import ConfAnalyzer
 from utils.Configuration import Configuration
 from utils.ExerciseGuidanceState import ExerciseGuidanceState
+from utils.ProvenanceTrackingState import ProvenanceTrackingState
 
 from utils.InstanceCreator import InstanceCreator
 from utils.Logger import Logger
@@ -36,6 +37,7 @@ class Fuzzer(object):
         self.fuzzerConf: Dict[str, str] = Configuration.fuzzerConf
         self.putConf: Dict[str, str] = Configuration.putConf
         ExerciseGuidanceState.configure_from_current()
+        ProvenanceTrackingState.configure_from_current()
         
 
         ShowStats.mutationStrategy = self.fuzzerConf['mutator'].split(".")[-1]
@@ -85,7 +87,7 @@ class Fuzzer(object):
         argv = sys.argv[1:]
         res = {}
         try:
-            opts, args = getopt.getopt(argv, "p",["project=","seed_pool_selection_ratio=","seed_gen_seq_ratio=","data_viewer=","data_viewer_env=","ctests_trim_sampling=","ctests_trim_scale=","skip_unit_test=","force_system_testing_ratio=","require_unit_pass_for_system_test=","host_ip=","host_port=","run_time=","mutator=","systemtester=","ctest_total_time=","misconf_mode=","fuzzing_loop=","exercise_guided_mutation=","exercise_guided_explore_ratio="])
+            opts, args = getopt.getopt(argv, "p",["project=","seed_pool_selection_ratio=","seed_gen_seq_ratio=","data_viewer=","data_viewer_env=","ctests_trim_sampling=","ctests_trim_scale=","skip_unit_test=","force_system_testing_ratio=","require_unit_pass_for_system_test=","host_ip=","host_port=","run_time=","mutator=","systemtester=","ctest_total_time=","misconf_mode=","fuzzing_loop=","exercise_guided_mutation=","exercise_guided_explore_ratio=","use_provenance_agent=","provenance_agent_mode="])
             # opts, args = getopt.getopt(argv, ["project=","seed_pool_selection_ratio=","seed_gen_seq_ratio=","data_viewer=","data_viewer_env=","ctests_trim_sampling=","ctests_trim_scale=","skip_unit_test=","force_system_testing_ratio="])
         except:
             self.logger.info("Parameter Setting Error")
@@ -130,6 +132,10 @@ class Fuzzer(object):
                 res["exercise_guided_mutation"] = arg
             elif opt in ['--exercise_guided_explore_ratio']:
                 res["exercise_guided_explore_ratio"] = arg
+            elif opt in ['--use_provenance_agent']:
+                res["use_provenance_agent"] = arg
+            elif opt in ['--provenance_agent_mode']:
+                res["provenance_agent_mode"] = arg
         return res
         # for opt, arg in opts:
         #     if opt in ['--project']:

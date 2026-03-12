@@ -24,6 +24,7 @@ class Testcase(Seed):
         self.mutationBeforeValues: Dict[str, str] = {}
         self.mutationAfterValues: Dict[str, str] = {}
         self.systemExercisedConfNames: List[str] = []
+        self.systemUseBackedExercisedConfNames: List[str] = []
         self.systemExerciseWorkloadSignature: str = ""
         self.mutationCandidateSource: str = "baseline"
         # self.fileDir = Configuration.fuzzerConf['unit_testcase_dir']

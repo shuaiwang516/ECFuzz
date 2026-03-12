@@ -18,6 +18,7 @@ from utils.ShowStats import ShowStats
 from utils.Logger import Logger, getLogger
 from utils.MongoDb import MongoDb
 from utils.ParamTraceCollector import ParamTraceCollector
+from utils.ProvenanceTrackingState import ProvenanceTrackingState
 from utils.getCov import getCov
 from testValidator.MonitorThread import MonitorThread
 from queue import Queue
@@ -88,21 +89,34 @@ class TestValidator(object):
 
     def updateExerciseState(self, testcase: Testcase, system_result: TestResult, bootstrap: bool = False):
         exercised_names = list(self.sysTester.lastExercisedConfNames)
+        use_backed_names = list(self.sysTester.lastUseBackedConfNames)
         testcase.systemExercisedConfNames = exercised_names
+        testcase.systemUseBackedExercisedConfNames = use_backed_names
         testcase.systemExerciseWorkloadSignature = ExerciseGuidanceState.workloadSignature
         testcase.lastExercisedConfNames = exercised_names
         testcase.exerciseWorkloadSignature = ExerciseGuidanceState.workloadSignature
         if bootstrap:
             ExerciseGuidanceState.mark_bootstrap(testcase.fileName or testcase.filePath, exercised_names)
             new_global = set(exercised_names)
+            new_use_backed_global, _ = ProvenanceTrackingState.record_system_run(
+                use_backed_names,
+                accepted=True,
+                bootstrap=True,
+            )
         else:
             new_global, _ = ExerciseGuidanceState.record_system_run(
                 exercised_names,
                 accepted=(system_result is not None and system_result.status == 0),
             )
+            new_use_backed_global, _ = ProvenanceTrackingState.record_system_run(
+                use_backed_names,
+                accepted=(system_result is not None and system_result.status == 0),
+            )
 
         for param_name in sorted(new_global):
             self.comparisonMetrics.record_exercised_discovery(testcase, param_name)
+        for param_name in sorted(new_use_backed_global):
+            self.comparisonMetrics.record_use_backed_discovery(testcase, param_name)
         return exercised_names
 
     def normalizeFailureSignature(self, result: TestResult):

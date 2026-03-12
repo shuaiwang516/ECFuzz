@@ -13,7 +13,9 @@ from utils.UnitConstant import FUZZER_DIR
 
 
 class ParamTraceCollector(object):
-    EVENT_PATTERN = re.compile(r"\[CTEST\]\[(GET|SET|EXERCISED)-PARAM\]\s*(.*)")
+    EVENT_PATTERN = re.compile(r"\[CTEST\]\[([A-Z0-9-]+)\]\s*(.*)")
+    RAW_EXERCISED_OPERATIONS = {"GET-PARAM", "SET-PARAM", "EXERCISED-PARAM"}
+    USE_BACKED_OPERATION = "USE-BACKED-EXERCISED"
 
     def __init__(self) -> None:
         self.logger = getLogger()
@@ -26,7 +28,8 @@ class ParamTraceCollector(object):
         with open(self.summaryPath, "w", encoding="utf-8") as fd:
             fd.write(
                 "testcase_id\tunit_status\tsystem_status\tunit_tests\tunit_events\t"
-                "system_events\tunit_unique_params\tsystem_unique_params\t"
+                "system_events\tsystem_provenance_events\tunit_unique_params\tsystem_unique_params\t"
+                "system_use_backed_unique_params\t"
                 "unique_params\tparams\n"
             )
 
@@ -34,13 +37,17 @@ class ParamTraceCollector(object):
     def _parse_payload(cls, payload: str) -> Tuple[str, str]:
         payload = payload.strip()
         if payload.startswith("name="):
-            if "\tstack=" in payload:
-                name_part, stacktrace = payload.split("\tstack=", 1)
-                return name_part[len("name="):].strip(), stacktrace.strip()
-            if " stack=" in payload:
-                name_part, stacktrace = payload.split(" stack=", 1)
-                return name_part[len("name="):].strip(), stacktrace.strip()
-            return payload[len("name="):].strip(), ""
+            body = payload[len("name="):]
+            if "\tstack=" in body:
+                name_part, stacktrace = body.split("\tstack=", 1)
+                return name_part.strip(), stacktrace.strip()
+            if " stack=" in body:
+                name_part, stacktrace = body.split(" stack=", 1)
+                return name_part.strip(), stacktrace.strip()
+            name_parts = body.split(None, 1)
+            if len(name_parts) == 1:
+                return name_parts[0].strip(), ""
+            return name_parts[0].strip(), name_parts[1].strip()
         parts = payload.split(None, 1)
         if len(parts) == 1:
             return parts[0], ""
@@ -62,6 +69,8 @@ class ParamTraceCollector(object):
             if not match:
                 continue
             op, payload = match.groups()
+            if op in cls.RAW_EXERCISED_OPERATIONS:
+                op = op.replace("-PARAM", "")
             param_name, stacktrace = cls._parse_payload(payload)
             event = {
                 "operation": op,
@@ -230,12 +239,32 @@ class ParamTraceCollector(object):
         return "" if result is None else str(result.status)
 
     @staticmethod
-    def _unique_params(events: List[Dict[str, str]]) -> List[str]:
-        return sorted({event["param_name"] for event in events if event.get("param_name")})
+    def _unique_params(events: List[Dict[str, str]], operations: Optional[Set[str]] = None) -> List[str]:
+        return sorted(
+            {
+                event["param_name"]
+                for event in events
+                if event.get("param_name")
+                and (operations is None or event.get("operation") in operations)
+            }
+        )
 
     @classmethod
     def extract_exercised_names(cls, events: List[Dict[str, str]]) -> List[str]:
-        return cls._unique_params(events)
+        return cls._unique_params(events, operations={"GET", "SET", "EXERCISED"})
+
+    @classmethod
+    def extract_use_backed_names(cls, events: List[Dict[str, str]]) -> List[str]:
+        return cls._unique_params(events, operations={cls.USE_BACKED_OPERATION})
+
+    @classmethod
+    def extract_provenance_events(cls, events: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        return [
+            event
+            for event in events
+            if event.get("operation", "").startswith("PROV-")
+            or event.get("operation") == cls.USE_BACKED_OPERATION
+        ]
 
     def record_testcase(
         self,
@@ -249,9 +278,14 @@ class ParamTraceCollector(object):
         testcase_id = testcase.fileName if testcase.fileName else os.path.basename(testcase.filePath)
         testcase_params = {item.name: item.value for item in testcase.confItemList}
         all_events = list(unit_events) + list(system_events)
-        unit_unique_params = self._unique_params(unit_events)
-        system_unique_params = self._unique_params(system_events)
-        unique_params = self._unique_params(all_events)
+        unit_unique_params = self._unique_params(unit_events, operations={"GET", "SET", "EXERCISED"})
+        system_unique_params = self._unique_params(system_events, operations={"GET", "SET", "EXERCISED"})
+        system_use_backed_unique_params = self._unique_params(
+            system_events,
+            operations={self.USE_BACKED_OPERATION},
+        )
+        unique_params = self._unique_params(all_events, operations={"GET", "SET", "EXERCISED"})
+        system_provenance_events = self.extract_provenance_events(system_events)
 
         record = {
             "project": self.project,
@@ -264,6 +298,9 @@ class ParamTraceCollector(object):
             "mutation_after_values": dict(getattr(testcase, "mutationAfterValues", {})),
             "mutation_candidate_source": getattr(testcase, "mutationCandidateSource", "baseline"),
             "system_exercised_params": list(getattr(testcase, "systemExercisedConfNames", [])),
+            "system_use_backed_exercised_params": list(
+                getattr(testcase, "systemUseBackedExercisedConfNames", [])
+            ),
             "system_exercise_workload_signature": getattr(testcase, "systemExerciseWorkloadSignature", ""),
             "unit_tests": sorted(set(unit_tests)),
             "unit_status": self._status(unit_result),
@@ -272,15 +309,20 @@ class ParamTraceCollector(object):
                 "unit_tests": len(set(unit_tests)),
                 "unit_events": len(unit_events),
                 "system_events": len(system_events),
+                "system_provenance_events": len(system_provenance_events),
                 "unit_unique_params": len(unit_unique_params),
                 "system_unique_params": len(system_unique_params),
+                "system_use_backed_unique_params": len(system_use_backed_unique_params),
+                "raw_vs_use_backed_gap": len(system_unique_params) - len(system_use_backed_unique_params),
                 "unique_params": len(unique_params),
             },
             "unique_params": unique_params,
             "unit_unique_params": unit_unique_params,
             "system_unique_params": system_unique_params,
+            "system_use_backed_unique_params": system_use_backed_unique_params,
             "unit_events": unit_events,
             "system_events": system_events,
+            "system_provenance_events": system_provenance_events,
         }
 
         output_path = os.path.join(self.runDir, f"{testcase_id}.json")
@@ -291,8 +333,9 @@ class ParamTraceCollector(object):
             fd.write(
                 f"{testcase_id}\t{record['unit_status']}\t{record['system_status']}\t"
                 f"{record['counts']['unit_tests']}\t{record['counts']['unit_events']}\t"
-                f"{record['counts']['system_events']}\t{record['counts']['unit_unique_params']}\t"
-                f"{record['counts']['system_unique_params']}\t{record['counts']['unique_params']}\t"
+                f"{record['counts']['system_events']}\t{record['counts']['system_provenance_events']}\t"
+                f"{record['counts']['unit_unique_params']}\t{record['counts']['system_unique_params']}\t"
+                f"{record['counts']['system_use_backed_unique_params']}\t{record['counts']['unique_params']}\t"
                 f"{','.join(unique_params)}\n"
             )
         self.logger.info(

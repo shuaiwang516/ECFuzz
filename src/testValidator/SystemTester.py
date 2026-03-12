@@ -1,6 +1,7 @@
 import os, shutil, time, stat
 import subprocess, threading
 from subprocess import Popen, PIPE, STDOUT
+import shlex
 
 from dataModel.TestResult import TestResult
 from dataModel.Testcase import Testcase
@@ -41,6 +42,46 @@ class SystemTester(Tester):
         }
         self.lastTraceEvents = []
         self.lastExercisedConfNames = []
+        self.lastUseBackedConfNames = []
+
+    def _build_provenance_agent_opts(self):
+        if Configuration.fuzzerConf.get("use_provenance_agent", "False") != "True":
+            return ""
+        project = Configuration.fuzzerConf["project"]
+        mode = Configuration.fuzzerConf.get("provenance_agent_mode", "active")
+        agent_jar = "/home/hadoop/ecfuzz/agent/provenance-agent/ecfuzz-provenance-agent.jar"
+        allow_map = {
+            "hadoop-common": "org/apache/hadoop/",
+            "hadoop-hdfs": "org/apache/hadoop/",
+            "hbase": "org/apache/hadoop/hbase/;org/apache/hadoop/",
+            "zookeeper": "org/apache/zookeeper/",
+            "alluxio": "alluxio/",
+        }
+        deny_map = {
+            "hadoop-common": (
+                "org/apache/hadoop/metrics2/;"
+                "org/apache/hadoop/security/;"
+                "org/apache/hadoop/ipc/CallerContext"
+            ),
+            "hadoop-hdfs": (
+                "org/apache/hadoop/metrics2/;"
+                "org/apache/hadoop/security/;"
+                "org/apache/hadoop/ipc/CallerContext"
+            ),
+            "hbase": (
+                "org/apache/hadoop/metrics2/;"
+                "org/apache/hadoop/security/;"
+                "org/apache/hadoop/ipc/CallerContext"
+            ),
+            "zookeeper": "",
+            "alluxio": "",
+        }
+        return (
+            f"-javaagent:{agent_jar}="
+            f"project={project},mode={mode},emit_raw=true,emit_use_backed=true,"
+            f"arg_mode=caller-pass,field_mode=true,allow={allow_map.get(project, '')},"
+            f"deny={deny_map.get(project, '')}"
+        )
 
     def replaceConfig(self, testcase: Testcase):
         srcReplacePath = testcase.filePath
@@ -53,7 +94,63 @@ class SystemTester(Tester):
         env = os.environ.copy()
         env["ECFUZZ_COLLECT_EXERCISED_PARAMS"] = "true"
         env["ECFUZZ_EXERCISE_GUIDED_MUTATION"] = "true" if ExerciseGuidanceState.is_enabled() else "false"
+        agent_opts = self._build_provenance_agent_opts()
+        if agent_opts != "":
+            project = Configuration.fuzzerConf["project"]
+            mode = Configuration.fuzzerConf.get("provenance_agent_mode", "active")
+            env["ECFUZZ_USE_PROVENANCE_AGENT"] = "true"
+            env["ECFUZZ_PROVENANCE_AGENT_MODE"] = mode
+            project_opt_envs = {
+                "hadoop-common": (
+                    "HADOOP_OPTS",
+                    "HADOOP_CLIENT_OPTS",
+                    "HADOOP_NAMENODE_OPTS",
+                    "HADOOP_DATANODE_OPTS",
+                    "HADOOP_SECONDARYNAMENODE_OPTS",
+                    "HADOOP_JOURNALNODE_OPTS",
+                    "HADOOP_ZKFC_OPTS",
+                ),
+                "hadoop-hdfs": (
+                    "HADOOP_OPTS",
+                    "HADOOP_CLIENT_OPTS",
+                    "HADOOP_NAMENODE_OPTS",
+                    "HADOOP_DATANODE_OPTS",
+                    "HADOOP_SECONDARYNAMENODE_OPTS",
+                    "HADOOP_JOURNALNODE_OPTS",
+                    "HADOOP_ZKFC_OPTS",
+                ),
+                "hbase": (
+                    "HADOOP_OPTS",
+                    "HADOOP_CLIENT_OPTS",
+                    "HBASE_OPTS",
+                    "HBASE_MASTER_OPTS",
+                    "HBASE_REGIONSERVER_OPTS",
+                    "HBASE_ZOOKEEPER_OPTS",
+                    "HBASE_SHELL_OPTS",
+                ),
+                "zookeeper": ("SERVER_JVMFLAGS", "CLIENT_JVMFLAGS", "JVMFLAGS"),
+                "alluxio": (
+                    "ALLUXIO_JAVA_OPTS",
+                    "ALLUXIO_MASTER_JAVA_OPTS",
+                    "ALLUXIO_JOB_MASTER_JAVA_OPTS",
+                    "ALLUXIO_WORKER_JAVA_OPTS",
+                    "ALLUXIO_JOB_WORKER_JAVA_OPTS",
+                    "ALLUXIO_PROXY_JAVA_OPTS",
+                    "ALLUXIO_LOGSERVER_JAVA_OPTS",
+                    "ALLUXIO_USER_JAVA_OPTS",
+                ),
+            }
+            for env_name in project_opt_envs.get(project, ()):
+                current_value = env.get(env_name, "").strip()
+                env[env_name] = agent_opts if current_value == "" else f"{agent_opts} {current_value}"
         return env
+
+    def _build_system_java_command(self):
+        sys_java = Configuration.putConf['systest_java']
+        agent_opts = self._build_provenance_agent_opts()
+        if agent_opts == "":
+            return sys_java
+        return f"{shlex.quote(sys_java)} {shlex.quote(agent_opts)}"
 
     def runSystemTestUtils(self, testcase: Testcase, logDir: str, stopSoon: Queue, recordStats: bool = True) -> TestResult:
         Result = TestResult()
@@ -62,7 +159,7 @@ class SystemTester(Tester):
         #     sysChmod = "echo kb310 | sudo -S chmod -R 777 /home/hadoop/ecfuzz/data/app_sysTest/alluxio-2.1.0-work/underFSStorage"
         #     process = subprocess.run(sysChmod, shell=True, stdout=PIPE, stderr=PIPE, universal_newlines=True) 
         systestShellDir = Configuration.putConf['systest_shell_dir']
-        sysCmd = f"cd {systestShellDir} && {Configuration.putConf['systest_java']} {Configuration.putConf['systest_shell']}"
+        sysCmd = f"cd {systestShellDir} && {self._build_system_java_command()} {Configuration.putConf['systest_shell']}"
         self.logger.info(f">>>>[systest] {self.project} is undergoing system test validation...")
         sysStartTime = time.time()
         stop = Queue()
@@ -81,6 +178,7 @@ class SystemTester(Tester):
         stop.put(1)
         self.lastTraceEvents = []
         self.lastExercisedConfNames = []
+        self.lastUseBackedConfNames = []
         self.lastTraceEvents.extend(
             ParamTraceCollector.parse_events_from_text(
                 process.stdout,
@@ -104,6 +202,7 @@ class SystemTester(Tester):
             )
         )
         self.lastExercisedConfNames = ParamTraceCollector.extract_exercised_names(self.lastTraceEvents)
+        self.lastUseBackedConfNames = ParamTraceCollector.extract_use_backed_names(self.lastTraceEvents)
 
         onceSysTime = sysEndTime - sysStartTime
         if recordStats:
@@ -119,6 +218,9 @@ class SystemTester(Tester):
             f">>>>[systest] The return code of {testcase.filePath} system test verification is {Result.status}.")
         self.logger.info(
             f">>>>[systest] exercised params observed in this run: {len(self.lastExercisedConfNames)}"
+        )
+        self.logger.info(
+            f">>>>[systest] use-backed exercised params observed in this run: {len(self.lastUseBackedConfNames)}"
         )
         if Result.status != 0:
             ShowStats.lastNewFailSystemTest = 0.0
@@ -215,6 +317,7 @@ class SystemTester(Tester):
         logLoc = self.logLocation[Configuration.fuzzerConf["project"]]
         self.lastTraceEvents = []
         self.lastExercisedConfNames = []
+        self.lastUseBackedConfNames = []
         self.deleteDir(logLoc)
         self.replaceConfig(testcase)
         Result = self.runSystemTestUtils(testcase, logLoc, stopSoon, recordStats=recordStats)

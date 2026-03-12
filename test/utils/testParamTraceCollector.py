@@ -89,6 +89,22 @@ class TestParamTraceCollector(unittest.TestCase):
         self.assertEqual("EXERCISED", events[0]["operation"])
         self.assertEqual("dfs.blocksize", events[0]["param_name"])
 
+    def test_parse_use_backed_and_provenance_markers(self):
+        text = "\n".join(
+            [
+                "[CTEST][USE-BACKED-EXERCISED] name=dfs.replication reason=field-touch site=Example#read",
+                "[CTEST][PROV-FIELD-STORE] name=dfs.replication field=Example#field writer=Example#write",
+            ]
+        )
+
+        events = ParamTraceCollector.parse_events_from_text(text, source="system")
+
+        self.assertEqual(2, len(events))
+        self.assertEqual("USE-BACKED-EXERCISED", events[0]["operation"])
+        self.assertEqual("dfs.replication", events[0]["param_name"])
+        self.assertEqual(["dfs.replication"], ParamTraceCollector.extract_use_backed_names(events))
+        self.assertEqual(2, len(ParamTraceCollector.extract_provenance_events(events)))
+
 
 if __name__ == "__main__":
     unittest.main()

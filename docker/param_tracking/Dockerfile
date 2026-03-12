@@ -18,8 +18,10 @@ COPY --chown=hadoop:hadoop src/utils/ComparisonMetricsRecorder.py /home/hadoop/e
 COPY --chown=hadoop:hadoop src/utils/Configuration.py /home/hadoop/ecfuzz/src/utils/Configuration.py
 COPY --chown=hadoop:hadoop src/utils/ExerciseGuidanceState.py /home/hadoop/ecfuzz/src/utils/ExerciseGuidanceState.py
 COPY --chown=hadoop:hadoop src/utils/ParamTraceCollector.py /home/hadoop/ecfuzz/src/utils/ParamTraceCollector.py
+COPY --chown=hadoop:hadoop src/utils/ProvenanceTrackingState.py /home/hadoop/ecfuzz/src/utils/ProvenanceTrackingState.py
 COPY --chown=hadoop:hadoop src/utils/ShowStats.py /home/hadoop/ecfuzz/src/utils/ShowStats.py
 COPY --chown=hadoop:hadoop data/fuzzer/fuzzing.conf /home/hadoop/ecfuzz/data/fuzzer/fuzzing.conf
+COPY --chown=hadoop:hadoop java/experimental-provenance-agent /home/hadoop/ecfuzz/java/experimental-provenance-agent
 
 COPY --chown=hadoop:hadoop docker/param_tracking/overrides/hadoop/Configuration.java /home/hadoop/ecfuzz/data/app/ctest-hadoop/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/conf/Configuration.java
 COPY --chown=hadoop:hadoop docker/param_tracking/overrides/zookeeper/ServerConfig.java /home/hadoop/ecfuzz/data/app/ctest-zookeeper/zookeeper-server/src/main/java/org/apache/zookeeper/server/ServerConfig.java
@@ -33,6 +35,12 @@ COPY --chown=hadoop:hadoop docker/param_tracking/rebuild_targets.sh /tmp/rebuild
 RUN chmod +x /tmp/rebuild_targets.sh
 
 USER hadoop
+
+RUN mkdir -p /home/hadoop/ecfuzz/agent/provenance-agent && \
+    cd /home/hadoop/ecfuzz/java/experimental-provenance-agent && \
+    mvn -q -DskipTests package && \
+    cp -f target/ecfuzz-provenance-agent.jar \
+      /home/hadoop/ecfuzz/agent/provenance-agent/ecfuzz-provenance-agent.jar
 
 RUN /tmp/rebuild_targets.sh
 

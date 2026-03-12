@@ -77,10 +77,39 @@ public class AlluxioProperties {
   }
 
   private static void logExercise(String name) {
+    logExercise(name, true);
+  }
+
+  private static void logExercise(String name, boolean noteProvenance) {
     if (!shouldCollectExercised()) {
       return;
     }
     LOG.warn("[CTEST][EXERCISED-PARAM] name=" + name);
+    if (noteProvenance) {
+      noteProvenanceGet(name);
+    }
+  }
+
+  private static volatile java.lang.reflect.Method provenanceNoteMethod;
+
+  private static void noteProvenanceGet(String name) {
+    if (name == null || name.isEmpty()) {
+      return;
+    }
+    try {
+      java.lang.reflect.Method method = provenanceNoteMethod;
+      if (method == null) {
+        ClassLoader runtimeLoader = ClassLoader.getSystemClassLoader();
+        Class<?> runtimeClass =
+            runtimeLoader == null
+                ? Class.forName("ecfuzz.agent.runtime.TraceRuntime")
+                : Class.forName("ecfuzz.agent.runtime.TraceRuntime", true, runtimeLoader);
+        method = runtimeClass.getMethod("noteConfigGet", String.class);
+        provenanceNoteMethod = method;
+      }
+      method.invoke(null, name);
+    } catch (Throwable ignored) {
+    }
   }
 
   @Nullable
@@ -126,7 +155,7 @@ public class AlluxioProperties {
    */
   public void put(PropertyKey key, String value, Source source) {
     if (!mUserProps.containsKey(key) || source.compareTo(getSource(key)) >= 0) {
-      logExercise(key.getName());
+      logExercise(key.getName(), false);
       mUserProps.put(key, Optional.ofNullable(value));
       mSources.put(key, source);
       mHash.markOutdated();

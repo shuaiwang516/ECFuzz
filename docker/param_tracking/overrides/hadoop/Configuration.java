@@ -1082,10 +1082,39 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   }
 
   private static void logExercise(String name) {
+    logExercise(name, true);
+  }
+
+  private static void logExercise(String name, boolean noteProvenance) {
     if (!shouldCollectExercised()) {
       return;
     }
     LOG.warn("[CTEST][EXERCISED-PARAM] name=" + name);
+    if (noteProvenance) {
+      noteProvenanceGet(name);
+    }
+  }
+
+  private static volatile java.lang.reflect.Method provenanceNoteMethod;
+
+  private static void noteProvenanceGet(String name) {
+    if (name == null || name.isEmpty()) {
+      return;
+    }
+    try {
+      java.lang.reflect.Method method = provenanceNoteMethod;
+      if (method == null) {
+        ClassLoader runtimeLoader = ClassLoader.getSystemClassLoader();
+        Class<?> runtimeClass =
+            runtimeLoader == null
+                ? Class.forName("ecfuzz.agent.runtime.TraceRuntime")
+                : Class.forName("ecfuzz.agent.runtime.TraceRuntime", true, runtimeLoader);
+        method = runtimeClass.getMethod("noteConfigGet", String.class);
+        provenanceNoteMethod = method;
+      }
+      method.invoke(null, name);
+    } catch (Throwable ignored) {
+    }
   }
   
   /**
@@ -1280,7 +1309,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       getProps();
     }
     if (trackExercise) {
-      logExercise(name);
+      logExercise(name, false);
     }
     getOverlay().setProperty(name, value);
     getProps().setProperty(name, value);
@@ -1293,7 +1322,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
         for(String n: altNames) {
           if(!n.equals(name)) {
             if (trackExercise) {
-              logExercise(n);
+              logExercise(n, false);
             }
             getOverlay().setProperty(n, value);
             getProps().setProperty(n, value);
@@ -1307,7 +1336,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       String altSource = "because " + name + " is deprecated";
       for(String n : names) {
         if (trackExercise) {
-          logExercise(n);
+          logExercise(n, false);
         }
         getOverlay().setProperty(n, value);
         getProps().setProperty(n, value);
