@@ -27,9 +27,12 @@ COPY --chown=hadoop:hadoop docker/param_tracking/overrides/hadoop/Configuration.
 COPY --chown=hadoop:hadoop docker/param_tracking/overrides/zookeeper/ServerConfig.java /home/hadoop/ecfuzz/data/app/ctest-zookeeper/zookeeper-server/src/main/java/org/apache/zookeeper/server/ServerConfig.java
 COPY --chown=hadoop:hadoop docker/param_tracking/overrides/zookeeper/QuorumPeerConfig.java /home/hadoop/ecfuzz/data/app/ctest-zookeeper/zookeeper-server/src/main/java/org/apache/zookeeper/server/quorum/QuorumPeerConfig.java
 COPY --chown=hadoop:hadoop docker/param_tracking/overrides/zookeeper/QuorumPeerMain.java /home/hadoop/ecfuzz/data/app/ctest-zookeeper/zookeeper-server/src/main/java/org/apache/zookeeper/server/quorum/QuorumPeerMain.java
+COPY --chown=hadoop:hadoop docker/param_tracking/overrides/zookeeper/App.java /home/hadoop/ecfuzz/data/systest_java/zookeeper/zkapi/src/main/java/com/zookeeper/api/App.java
+COPY --chown=hadoop:hadoop docker/param_tracking/overrides/zookeeper/test_zk_shell_api.java /home/hadoop/ecfuzz/data/systest_java/zookeeper/test_zookeeper/test_zk_shell_api.java
 COPY --chown=hadoop:hadoop docker/param_tracking/overrides/alluxio/AlluxioProperties.java /home/hadoop/ecfuzz/data/app/ctest-alluxio/core/common/src/main/java/alluxio/conf/AlluxioProperties.java
 COPY --chown=hadoop:hadoop docker/param_tracking/overrides/alluxio/InstancedConfiguration.java /home/hadoop/ecfuzz/data/app/ctest-alluxio/core/common/src/main/java/alluxio/conf/InstancedConfiguration.java
 COPY --chown=hadoop:hadoop docker/param_tracking/overrides/alluxio/SpecificPathConfiguration.java /home/hadoop/ecfuzz/data/app/ctest-alluxio/core/common/src/main/java/alluxio/conf/path/SpecificPathConfiguration.java
+COPY --chown=hadoop:hadoop docker/param_tracking/overrides/hbase/test_hbase_shell_api.java /home/hadoop/ecfuzz/data/systest_java/hbase/test_hbase/test_hbase_shell_api.java
 COPY --chown=hadoop:hadoop docker/param_tracking/rebuild_targets.sh /tmp/rebuild_targets.sh
 
 RUN chmod +x /tmp/rebuild_targets.sh

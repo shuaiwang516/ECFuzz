@@ -263,7 +263,7 @@ public class QuorumPeerConfig {
     }
 
     private void injectError(boolean inj_env_param) throws ConfigException {
-        String injectionFile = "ctest.cfg";
+        String injectionFile = resolveInjectionFile();
         try {
             Properties cfg = new Properties();
             FileInputStream in = new FileInputStream(injectionFile);
@@ -278,6 +278,25 @@ public class QuorumPeerConfig {
         } catch (IllegalArgumentException e) {
             throw new ConfigException("[CTEST] Error injecting from " + injectionFile, e);
         }
+    }
+
+    private String resolveInjectionFile() {
+        String configured = System.getProperty("ecfuzz.zk.ctest.cfg");
+        if (configured != null && configured.trim().length() > 0 && new File(configured.trim()).exists()) {
+            return configured.trim();
+        }
+
+        String[] candidates = new String[] {
+            "ctest.cfg",
+            "/home/hadoop/ecfuzz/data/app/ctest-zookeeper/zookeeper-server/ctest.cfg",
+        };
+
+        for (String candidate : candidates) {
+            if (new File(candidate).exists()) {
+                return candidate;
+            }
+        }
+        return "ctest.cfg";
     }
 
     // This method gets the version from the end of dynamic file name.

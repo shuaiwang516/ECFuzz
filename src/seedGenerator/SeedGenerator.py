@@ -74,33 +74,43 @@ class SeedGenerator(object):
             self.lastGeneratedSeed = random.choice(self.seedPool)
         else:  
             self.logger.info("Try creating a Seed...")
-            confItemList = copy.deepcopy(self.confItemMutable)
-            confItemList, candidate_source = ExerciseGuidanceState.choose_candidate_names(confItemList)
-            self.logger.info(f">>>>[SeedGenerator] candidate source is {candidate_source} with {len(confItemList)} names")
+            candidate_names = copy.deepcopy(self.confItemMutable)
+            candidate_names, candidate_source = ExerciseGuidanceState.choose_candidate_names(candidate_names)
+            self.logger.info(f">>>>[SeedGenerator] candidate source is {candidate_source} with {len(candidate_names)} names")
             # k = random.randint(1, confItemList.__len__())
             if Configuration.fuzzerConf['mutator'].split(".")[-1] == "SingleMutator":
                 k = 1
             else:
                 k = random.randint(3, 6)
-            k = min(k, len(confItemList)) if confItemList else 0
+            k = min(k, len(candidate_names)) if candidate_names else 0
 
             if k == 0:
-                confItemList = copy.deepcopy(self.confItemMutable)
-                k = 1 if Configuration.fuzzerConf['mutator'].split(".")[-1] == "SingleMutator" else min(3, len(confItemList))
+                candidate_names = copy.deepcopy(self.confItemMutable)
+                candidate_source = "baseline-fallback"
+                k = 1 if Configuration.fuzzerConf['mutator'].split(".")[-1] == "SingleMutator" else min(3, len(candidate_names))
 
             if random.random() > float(Configuration.fuzzerConf['seed_gen_seq_ratio']):
+                confItemList = copy.deepcopy(candidate_names)
                 random.shuffle(confItemList)
                 confItemList = confItemList[:k]
             else:
-                b = min(self.confItemMutableSize, self.sequentialGeneratorIndex + k)
-                if self.sequentialGeneratorIndex > b:
-                    confItemList = confItemList[b : self.sequentialGeneratorIndex]
+                candidate_count = len(candidate_names)
+                if candidate_count == 0:
+                    confItemList = []
                 else:
-                    confItemList = confItemList[self.sequentialGeneratorIndex: b]
-                self.sequentialGeneratorIndex = b
-                if self.sequentialGeneratorIndex >= self.confItemMutableSize:
-                    self.sequentialGeneratorIndex = 0
+                    if self.sequentialGeneratorIndex >= candidate_count:
+                        self.sequentialGeneratorIndex = 0
+                    b = min(candidate_count, self.sequentialGeneratorIndex + k)
+                    confItemList = candidate_names[self.sequentialGeneratorIndex: b]
+                    self.sequentialGeneratorIndex = 0 if b >= candidate_count else b
 
+            if len(confItemList) == 0 and len(candidate_names) != 0:
+                self.logger.info(">>>>[SeedGenerator] sequential selection produced an empty seed; falling back to random candidate selection")
+                confItemList = copy.deepcopy(candidate_names)
+                random.shuffle(confItemList)
+                fallback_k = min(max(1, k), len(confItemList))
+                confItemList = confItemList[:fallback_k]
+                    
             relatedConfItems = []
             for confItemName in confItemList:
                 if self.confItemRelations.__contains__(confItemName):

@@ -87,6 +87,29 @@ class TestExerciseGuidedMutation(unittest.TestCase):
 
         self.assertEqual(["b"], [item.name for item in seed.confItemList])
 
+    def test_seed_generator_resets_sequential_index_for_small_guided_universe(self):
+        Configuration.fuzzerConf["exercise_guided_mutation"] = "True"
+        Configuration.fuzzerConf["mutator"] = "testcaseGenerator.SmartMutator.SmartMutator"
+        Configuration.fuzzerConf["seed_gen_seq_ratio"] = "1"
+        ExerciseGuidanceState.configure_from_current()
+        ExerciseGuidanceState.projectGlobalExercisedParams = {"b", "c"}
+
+        sg = SeedGenerator()
+        sg.confItemMutable = ["a", "b", "c", "d"]
+        sg.confItemMutableSize = len(sg.confItemMutable)
+        sg.confItemsBasic = []
+        sg.confItems = list(sg.confItemMutable)
+        sg.confItemRelations = {}
+        sg.confItemTypeMap = {"a": "INT", "b": "INT", "c": "INT", "d": "INT"}
+        sg.confItemValueMap = {"a": "1", "b": "2", "c": "3", "d": "4"}
+        sg.sequentialGeneratorIndex = 3
+
+        random.seed(0)
+        seed = sg.generateSeed()
+
+        self.assertNotEqual([], [item.name for item in seed.confItemList])
+        self.assertTrue(set(item.name for item in seed.confItemList).issubset({"b", "c"}))
+
 
 if __name__ == "__main__":
     unittest.main()

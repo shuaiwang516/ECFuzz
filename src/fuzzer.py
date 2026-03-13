@@ -66,6 +66,11 @@ class Fuzzer(object):
 
     def sigintHandler(self, signum, frame):
         stopSoon.put(True)
+        print(
+            f"[fuzzer-stdout] receive SIGINT loop={ShowStats.loopCounts} "
+            f"iteration={ShowStats.iterationCounts} currentJob={ShowStats.currentJob} "
+            f"queueLength={ShowStats.queueLength}"
+        )
         self.logger.info(f">>>>[fuzzer] excludeConf : {ConfAnalyzer.excludeConf}; confMutationInfo : {ConfAnalyzer.confMutationInfo}")
         self.logger.info(f">>>>[fuzzer] receive SIGINT")
         time.sleep(1)
@@ -185,39 +190,85 @@ class Fuzzer(object):
 
         # print("\033[37m")
         try:
+            stop_reason = "unknown"
             self.testValidator.runExerciseBootstrap(stopSoon)
             if fuzzingLoop > 0:
                 self.logger.info(f"Fuzzer ready to run for {fuzzingLoop} loops...")
                 for _ in range(fuzzingLoop):
                     try:
                         if (not stopSoon.empty()):
+                            stop_reason = "stopSoon queue non-empty"
                             t1.join()
                             break
                     except Exception as e:
+                        stop_reason = f"stopSoon check exception: {e!r}"
                         print(e)
                         break
                     try:
                         self.loop(stopSoon)
-                    except Exception as e:
-                        self.logger.info(e)
+                    except BaseException as e:
+                        stop_reason = f"loop exception: {e!r}"
+                        print(
+                            f"[fuzzer-stdout] loop execution failed at loop={ShowStats.loopCounts} "
+                            f"iteration={ShowStats.iterationCounts} currentJob={ShowStats.currentJob} "
+                            f"queueLength={ShowStats.queueLength} exc={e!r}"
+                        )
+                        self.logger.exception(
+                            "loop execution failed at loop=%s iteration=%s currentJob=%s queueLength=%s",
+                            ShowStats.loopCounts,
+                            ShowStats.iterationCounts,
+                            ShowStats.currentJob,
+                            ShowStats.queueLength,
+                        )
                         break
             else:
                 self.logger.info("Fuzzer ready to run forever...")
                 while True:
                     try:
                         if not stopSoon.empty():
+                            stop_reason = "stopSoon queue non-empty"
                             t1.join()
                             break
                     except Exception as e:
+                        stop_reason = f"stopSoon check exception: {e!r}"
                         print(e)
                         break
                     try:
                         self.loop(stopSoon)
-                    except Exception as e:
-                        self.logger.info(e)
+                    except BaseException as e:
+                        stop_reason = f"loop exception: {e!r}"
+                        print(
+                            f"[fuzzer-stdout] loop execution failed at loop={ShowStats.loopCounts} "
+                            f"iteration={ShowStats.iterationCounts} currentJob={ShowStats.currentJob} "
+                            f"queueLength={ShowStats.queueLength} exc={e!r}"
+                        )
+                        self.logger.exception(
+                            "loop execution failed at loop=%s iteration=%s currentJob=%s queueLength=%s",
+                            ShowStats.loopCounts,
+                            ShowStats.iterationCounts,
+                            ShowStats.currentJob,
+                            ShowStats.queueLength,
+                        )
                         break
         finally:
             stopSoon.put(True)
+            print(
+                f"[fuzzer-stdout] shutting down stop_reason={stop_reason} "
+                f"elapsed_seconds={time.time() - ShowStats.fuzzerStartTime} "
+                f"configured_run_time_hours={Configuration.fuzzerConf['run_time']} "
+                f"loop={ShowStats.loopCounts} iteration={ShowStats.iterationCounts} "
+                f"queueLength={ShowStats.queueLength} acceptedSeedCount={ShowStats.acceptedSeedCount}"
+            )
+            self.logger.info(
+                "fuzzer shutting down: stop_reason=%s elapsed_seconds=%s configured_run_time_hours=%s loop=%s iteration=%s queueLength=%s acceptedSeedCount=%s",
+                stop_reason,
+                time.time() - ShowStats.fuzzerStartTime,
+                Configuration.fuzzerConf['run_time'],
+                ShowStats.loopCounts,
+                ShowStats.iterationCounts,
+                ShowStats.queueLength,
+                ShowStats.acceptedSeedCount,
+            )
             # write data to db
             result_data = {}
             result_data['totalSystemTestFailed'] = ShowStats.totalSystemTestFailed
@@ -249,7 +300,16 @@ class Fuzzer(object):
             If any result yields an interesting value, we add that seed back to our pool for future iterations.
         """
         # run time limit
-        if time.time() - ShowStats.fuzzerStartTime > 3600 * int(Configuration.fuzzerConf['run_time']):
+        elapsed_seconds = time.time() - ShowStats.fuzzerStartTime
+        configured_run_time_hours = int(Configuration.fuzzerConf['run_time'])
+        if elapsed_seconds > 3600 * configured_run_time_hours:
+            self.logger.info(
+                "runtime limit reached: elapsed_seconds=%s configured_run_time_hours=%s loop=%s iteration=%s",
+                elapsed_seconds,
+                configured_run_time_hours,
+                ShowStats.loopCounts,
+                ShowStats.iterationCounts,
+            )
             # need to exit
             stopSoon.put(True)
         self.logger.info("Generator a Seed from SeedGenerator")

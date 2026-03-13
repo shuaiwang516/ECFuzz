@@ -172,6 +172,7 @@ class SystemTester(Tester):
             stderr=PIPE,
             universal_newlines=True,
             env=self._build_system_env(),
+            start_new_session=True,
         )
         Result.status = process.returncode
         sysEndTime = time.time()

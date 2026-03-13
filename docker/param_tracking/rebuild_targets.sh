@@ -42,6 +42,30 @@ if old in text:
 path.write_text(text)
 PY
 
+python3 - <<'PY'
+from pathlib import Path
+
+path = Path("/home/hadoop/ecfuzz/data/systest_java/hbase/hbaseapi/src/main/java/com/hbase/api/TestApi.java")
+text = path.read_text()
+if "org.apache.hadoop.fs.Path;" not in text:
+    text = text.replace(
+        "import org.apache.hadoop.hbase.TableName;\n",
+        "import org.apache.hadoop.hbase.TableName;\nimport org.apache.hadoop.fs.Path;\n",
+    )
+
+marker = "    private static TableDescriptor tableDescriptor;\n"
+helper = """    private static TableDescriptor tableDescriptor;\n    private static final String RUNTIME_CONF_PATH = \"/home/hadoop/ecfuzz/data/app_sysTest/hbase-2.2.2-work/conf/hbase-site.xml\";\n\n    private static Configuration loadRuntimeConfiguration() {\n        Configuration conf = HBaseConfiguration.create();\n        conf.addResource(new Path(RUNTIME_CONF_PATH));\n        String quorum = conf.get(\"hbase.zookeeper.quorum\");\n        if (quorum == null || quorum.trim().isEmpty()) {\n            conf.set(\"hbase.zookeeper.quorum\", \"127.0.0.1\");\n        }\n        String clientPort = conf.get(\"hbase.zookeeper.property.clientPort\");\n        if (clientPort == null || clientPort.trim().isEmpty()) {\n            conf.set(\"hbase.zookeeper.property.clientPort\", \"2181\");\n        }\n        return conf;\n    }\n"""
+if marker in text and "loadRuntimeConfiguration()" not in text:
+    text = text.replace(marker, helper)
+
+old_init = """    public static void init() throws Exception {\n        configuration = HBaseConfiguration.create();\n        configuration.set(\"hbase.zookeeper.quorum\", \"127.0.0.1\");//\n        configuration.set(\"hbase.zookeeper.property.clientPort\", \"2181\");\n        try {\n            connection = ConnectionFactory.createConnection(configuration);\n            admin = connection.getAdmin();\n        } catch (Exception e) {\n            e.printStackTrace();\n            throw e;\n        }\n    }\n"""
+new_init = """    public static void init() throws Exception {\n        configuration = loadRuntimeConfiguration();\n        try {\n            connection = ConnectionFactory.createConnection(configuration);\n            admin = connection.getAdmin();\n        } catch (Exception e) {\n            e.printStackTrace();\n            throw e;\n        }\n    }\n"""
+if old_init in text:
+    text = text.replace(old_init, new_init)
+
+path.write_text(text)
+PY
+
 cd "${HBASE_ROOT}"
 mvn -pl hbase-common -am install -DskipTests
 cp -f "${HBASE_COMMON_TARGET}/hbase-common-2.2.2.jar" \
@@ -53,6 +77,16 @@ cd "${ZOOKEEPER_ROOT}"
 mvn -pl zookeeper-server -am install -DskipTests
 cp -f "${ZOOKEEPER_TARGET}/zookeeper-3.5.6.jar" \
   "${ZOOKEEPER_RUNTIME}/lib/zookeeper-3.5.6.jar"
+
+cd /home/hadoop/ecfuzz/data/systest_java/hbase/hbaseapi
+mvn -q -DskipTests package
+cd /home/hadoop/ecfuzz/data/systest_java/hbase/test_hbase
+/usr/lib/jvm/jdk-11.0.13/bin/javac test_hbase_shell_api.java
+
+cd /home/hadoop/ecfuzz/data/systest_java/zookeeper/zkapi
+mvn -q -DskipTests package
+cd /home/hadoop/ecfuzz/data/systest_java/zookeeper/test_zookeeper
+/usr/lib/jvm/jdk-11.0.13/bin/javac test_zk_shell_api.java
 
 python3 - <<'PY'
 from pathlib import Path
