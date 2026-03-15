@@ -77,14 +77,13 @@ class TestValidator(object):
             if not testcase.__contains__(conf):
                 testcase.addConfItem(ConfItem('hbase.rootdir', 'DIRPATH', '/home/hadoop/hbase-2.2.2-work/hbase-tmp'))
 
-    def buildDefaultSystemTestcase(self) -> Testcase:
-        confItems = []
-        for name, value in ConfAnalyzer.confItemValueMap.items():
-            confItems.append(ConfItem(name, ConfAnalyzer.confItemTypeMap[name], value))
-        testcase = Testcase(confItems)
+    def buildPreparedRuntimeBootstrapTestcase(self) -> Testcase:
+        testcase = Testcase([])
+        testcase.fileName = "Bootstrap-prepared-runtime"
+        testcase.filePath = Configuration.putConf['replace_conf_path']
         testcase.mutationCandidateSource = "bootstrap"
         testcase.exerciseWorkloadSignature = ExerciseGuidanceState.workloadSignature
-        self.prepareTestcaseForExecution(testcase)
+        testcase.systemExerciseWorkloadSignature = ExerciseGuidanceState.workloadSignature
         return testcase
 
     def updateExerciseState(self, testcase: Testcase, system_result: TestResult, bootstrap: bool = False):
@@ -93,6 +92,8 @@ class TestValidator(object):
         testcase.systemExercisedConfNames = exercised_names
         testcase.systemUseBackedExercisedConfNames = use_backed_names
         testcase.systemExerciseWorkloadSignature = ExerciseGuidanceState.workloadSignature
+        testcase.systemTraceStatus = getattr(self.sysTester, "lastTraceStatus", "no-system-run")
+        testcase.systemTraceDetails = dict(getattr(self.sysTester, "lastTraceDetails", {}) or {})
         testcase.lastExercisedConfNames = exercised_names
         testcase.exerciseWorkloadSignature = ExerciseGuidanceState.workloadSignature
         if bootstrap:
@@ -141,12 +142,8 @@ class TestValidator(object):
         if ExerciseGuidanceState.should_run_bootstrap() is False:
             return None
         ShowStats.currentJob = 'bootstrap system tracking'
-        testcase = self.buildDefaultSystemTestcase()
-        testcase.writeToFile(
-            fileDir=Configuration.fuzzerConf['unit_testcase_dir'],
-            fileName="Bootstrap-default",
-        )
-        result = self.sysTester.runTest(testcase, stopSoon, recordStats=False)
+        testcase = self.buildPreparedRuntimeBootstrapTestcase()
+        result = self.sysTester.runTest(testcase, stopSoon, recordStats=False, replaceConfig=False)
         self.updateExerciseState(testcase, result, bootstrap=True)
         self.comparisonMetrics.record_bootstrap(testcase, testcase.systemExercisedConfNames, result)
         self.comparisonMetrics.record_snapshot()
@@ -154,6 +151,8 @@ class TestValidator(object):
 
     def finalize_without_system(self, testcase: Testcase, startTime: float, utRes: TestResult):
         self.ensure_testcase_written(testcase)
+        testcase.systemTraceStatus = "no-system-run"
+        testcase.systemTraceDetails = {}
         self.paramTraceCollector.record_testcase(
             testcase,
             self.unitTester.last_ran_tests,
@@ -161,6 +160,7 @@ class TestValidator(object):
             [],
             utRes,
             None,
+            system_trace_capture=None,
         )
         endTime = time.time()
         self.totalTime += endTime - startTime
@@ -369,6 +369,7 @@ class TestValidator(object):
             self.sysTester.lastTraceEvents,
             utRes,
             stRes,
+            system_trace_capture=getattr(self.sysTester, "lastTraceCapture", None),
         )
         failure_signature, exception_class = self.normalizeFailureSignature(stRes)
         if failure_signature != "":

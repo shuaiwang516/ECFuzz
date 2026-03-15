@@ -40,9 +40,7 @@ class SystemTester(Tester):
             "alluxio": os.path.join(DATA_DIR, "app_sysTest/alluxio-2.1.0-work/logs"),
             "zookeeper": os.path.join(DATA_DIR, "app_sysTest/zookeeper-3.5.6-work/logs")
         }
-        self.lastTraceEvents = []
-        self.lastExercisedConfNames = []
-        self.lastUseBackedConfNames = []
+        self._reset_trace_state()
 
     def _build_provenance_agent_opts(self):
         if Configuration.fuzzerConf.get("use_provenance_agent", "False") != "True":
@@ -152,6 +150,74 @@ class SystemTester(Tester):
             return sys_java
         return f"{shlex.quote(sys_java)} {shlex.quote(agent_opts)}"
 
+    def _reset_trace_state(self) -> None:
+        self.lastTraceEvents = []
+        self.lastExercisedConfNames = []
+        self.lastUseBackedConfNames = []
+        self.lastTraceStatus = "no-system-run"
+        self.lastTraceDetails = {}
+        self.lastTraceCapture = {}
+
+    def _summarize_trace_run(
+        self,
+        stdout_text: str,
+        stderr_text: str,
+        log_sources,
+        shell_sources,
+        system_events,
+    ):
+        exercised_events = [
+            event for event in system_events if event.get("operation") in {"GET", "SET", "EXERCISED"}
+        ]
+        exercised_names = ParamTraceCollector.extract_exercised_names(system_events)
+
+        trace_input_sources = []
+        if stdout_text.strip() != "":
+            trace_input_sources.append("stdout")
+        if stderr_text.strip() != "":
+            trace_input_sources.append("stderr")
+        if len(log_sources) != 0:
+            trace_input_sources.append("log-files")
+        if len(shell_sources) != 0:
+            trace_input_sources.append("shell-files")
+
+        if len(trace_input_sources) == 0:
+            trace_status = "system-run-no-trace-sources"
+        elif len(exercised_names) == 0:
+            trace_status = "system-run-trace-sources-zero-extracted-params"
+        else:
+            trace_status = "system-run-trace-sources-nonzero-extracted-params"
+
+        trace_details = {
+            "trace_input_sources": trace_input_sources,
+            "stdout_nonempty": stdout_text.strip() != "",
+            "stderr_nonempty": stderr_text.strip() != "",
+            "stdout_line_count": len(stdout_text.splitlines()) if stdout_text else 0,
+            "stderr_line_count": len(stderr_text.splitlines()) if stderr_text else 0,
+            "updated_log_files": [entry.get("path", "") for entry in log_sources],
+            "updated_log_relative_paths": [entry.get("relative_path", "") for entry in log_sources],
+            "updated_shell_files": [entry.get("path", "") for entry in shell_sources],
+            "updated_shell_relative_paths": [entry.get("relative_path", "") for entry in shell_sources],
+            "updated_log_file_count": len(log_sources),
+            "updated_shell_file_count": len(shell_sources),
+            "system_event_count": len(system_events),
+            "system_event_sources": ParamTraceCollector.distinct_values(system_events, "source"),
+            "system_event_source_counts": ParamTraceCollector.count_values(system_events, "source"),
+            "system_exercised_event_count": len(exercised_events),
+            "system_exercised_unique_param_count": len(exercised_names),
+            "system_exercised_event_sources": ParamTraceCollector.distinct_values(exercised_events, "source"),
+            "system_exercised_event_source_counts": ParamTraceCollector.count_values(
+                exercised_events,
+                "source",
+            ),
+            "system_event_log_paths": ParamTraceCollector.distinct_values(system_events, "log_path"),
+            "system_exercised_event_log_paths": ParamTraceCollector.distinct_values(
+                exercised_events,
+                "log_path",
+            ),
+        }
+        return trace_status, trace_details
+
     def runSystemTestUtils(self, testcase: Testcase, logDir: str, stopSoon: Queue, recordStats: bool = True) -> TestResult:
         Result = TestResult()
         # Result.count -= 1
@@ -164,6 +230,7 @@ class SystemTester(Tester):
         sysStartTime = time.time()
         stop = Queue()
         threading.Thread(target=MonitorThread.threadMonitor, args=[stop, logDir, stopSoon]).start()
+        logFileState = ParamTraceCollector.snapshot_file_state(logDir)
         shellFileState = ParamTraceCollector.snapshot_file_state(systestShellDir)
         process = subprocess.run(
             sysCmd,
@@ -177,9 +244,17 @@ class SystemTester(Tester):
         Result.status = process.returncode
         sysEndTime = time.time()
         stop.put(1)
-        self.lastTraceEvents = []
-        self.lastExercisedConfNames = []
-        self.lastUseBackedConfNames = []
+        self._reset_trace_state()
+        log_sources = ParamTraceCollector.collect_updated_text_sources(
+            logDir,
+            logFileState,
+            source="system-log",
+        )
+        shell_sources = ParamTraceCollector.collect_updated_text_sources(
+            systestShellDir,
+            shellFileState,
+            source="system-shell",
+        )
         self.lastTraceEvents.extend(
             ParamTraceCollector.parse_events_from_text(
                 process.stdout,
@@ -194,16 +269,23 @@ class SystemTester(Tester):
                 extra={"project": self.project},
             )
         )
-        self.lastTraceEvents.extend(ParamTraceCollector.extract_events_from_log_dir(logDir))
-        self.lastTraceEvents.extend(
-            ParamTraceCollector.extract_events_from_updated_files(
-                systestShellDir,
-                shellFileState,
-                source="system-shell",
-            )
-        )
+        self.lastTraceEvents.extend(ParamTraceCollector.extract_events_from_text_sources(log_sources))
+        self.lastTraceEvents.extend(ParamTraceCollector.extract_events_from_text_sources(shell_sources))
         self.lastExercisedConfNames = ParamTraceCollector.extract_exercised_names(self.lastTraceEvents)
         self.lastUseBackedConfNames = ParamTraceCollector.extract_use_backed_names(self.lastTraceEvents)
+        self.lastTraceStatus, self.lastTraceDetails = self._summarize_trace_run(
+            process.stdout or "",
+            process.stderr or "",
+            log_sources,
+            shell_sources,
+            self.lastTraceEvents,
+        )
+        self.lastTraceCapture = {
+            "stdout_text": process.stdout or "",
+            "stderr_text": process.stderr or "",
+            "log_sources": log_sources,
+            "shell_sources": shell_sources,
+        }
 
         onceSysTime = sysEndTime - sysStartTime
         if recordStats:
@@ -222,6 +304,12 @@ class SystemTester(Tester):
         )
         self.logger.info(
             f">>>>[systest] use-backed exercised params observed in this run: {len(self.lastUseBackedConfNames)}"
+        )
+        self.logger.info(
+            f">>>>[systest] trace diagnosis for this run: {self.lastTraceStatus} "
+            f"(inputs={self.lastTraceDetails.get('trace_input_sources', [])}, "
+            f"events={self.lastTraceDetails.get('system_event_count', 0)}, "
+            f"exercised={self.lastTraceDetails.get('system_exercised_unique_param_count', 0)})"
         )
         if Result.status != 0:
             ShowStats.lastNewFailSystemTest = 0.0
@@ -312,15 +400,19 @@ class SystemTester(Tester):
                 os.chmod(directory, stat.S_IWRITE)
             shutil.rmtree(directory) 
 
-    def runTest(self, testcase: Testcase, stopSoon, recordStats: bool = True) -> TestResult:
+    def runTest(self, testcase: Testcase, stopSoon, recordStats: bool = True, replaceConfig: bool = True) -> TestResult:
         # if Configuration.fuzzerConf['project'] == 'hbase':
         #     self.deleteDir("/home/hadoop/ecfuzz/data/app_sysTest/hbase-2.2.2-work/logs")
         logLoc = self.logLocation[Configuration.fuzzerConf["project"]]
-        self.lastTraceEvents = []
-        self.lastExercisedConfNames = []
-        self.lastUseBackedConfNames = []
+        self._reset_trace_state()
         self.deleteDir(logLoc)
-        self.replaceConfig(testcase)
+        if replaceConfig:
+            self.replaceConfig(testcase)
+        else:
+            self.logger.info(
+                f">>>>[systest] bootstrap using prepared runtime configuration as-is:"
+                f" {Configuration.putConf['replace_conf_path']}"
+            )
         Result = self.runSystemTestUtils(testcase, logLoc, stopSoon, recordStats=recordStats)
         return Result
     

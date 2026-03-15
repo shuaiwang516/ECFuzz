@@ -27,6 +27,8 @@ class Testcase(Seed):
         self.systemUseBackedExercisedConfNames: List[str] = []
         self.systemExerciseWorkloadSignature: str = ""
         self.mutationCandidateSource: str = "baseline"
+        self.systemTraceStatus: str = "no-system-run"
+        self.systemTraceDetails: Dict = {}
         # self.fileDir = Configuration.fuzzerConf['unit_testcase_dir']
 
     def __str__(self) -> str:

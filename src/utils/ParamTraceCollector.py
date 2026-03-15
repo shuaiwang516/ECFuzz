@@ -2,6 +2,7 @@ import json
 import os
 import re
 import xml.etree.ElementTree as ET
+from collections import Counter
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -29,8 +30,9 @@ class ParamTraceCollector(object):
             fd.write(
                 "testcase_id\tunit_status\tsystem_status\tunit_tests\tunit_events\t"
                 "system_events\tsystem_provenance_events\tunit_unique_params\tsystem_unique_params\t"
-                "system_use_backed_unique_params\t"
-                "unique_params\tparams\n"
+                "system_use_backed_unique_params\tunique_params\tparams\t"
+                "system_trace_status\tsystem_trace_input_sources\tsystem_event_sources\t"
+                "system_exercised_event_sources\tsystem_trace_artifact_count\n"
             )
 
     @classmethod
@@ -168,6 +170,18 @@ class ParamTraceCollector(object):
         return events
 
     @classmethod
+    def _safe_relative_path(cls, root_dir: str, file_path: str) -> str:
+        if not root_dir:
+            return os.path.basename(file_path)
+        try:
+            relpath = os.path.relpath(file_path, root_dir)
+        except ValueError:
+            relpath = os.path.basename(file_path)
+        if relpath.startswith(".."):
+            relpath = os.path.basename(file_path)
+        return relpath.replace("\\", "/")
+
+    @classmethod
     def snapshot_file_state(cls, root_dir: str) -> Dict[str, Tuple[int, int]]:
         state: Dict[str, Tuple[int, int]] = {}
         if not root_dir or not os.path.exists(root_dir):
@@ -186,15 +200,15 @@ class ParamTraceCollector(object):
         return state
 
     @classmethod
-    def extract_events_from_updated_files(
+    def collect_updated_text_sources(
         cls,
         root_dir: str,
         previous_state: Optional[Dict[str, Tuple[int, int]]] = None,
         source: str = "system-artifact",
     ) -> List[Dict[str, str]]:
-        events: List[Dict[str, str]] = []
+        text_sources: List[Dict[str, str]] = []
         if not root_dir or not os.path.exists(root_dir):
-            return events
+            return text_sources
 
         previous_state = previous_state or {}
 
@@ -219,20 +233,61 @@ class ParamTraceCollector(object):
                         if old_state and file_stat.st_size >= old_state[0]:
                             fd.seek(old_state[0])
                         content = fd.read()
+                        # Some system-test artifacts are rewritten in place rather than appended.
+                        # If the "tail since old size" is empty but the file changed, fall back to
+                        # reading the full file so we do not silently drop rewritten trace output.
+                        if (
+                            old_state
+                            and content.strip() == ""
+                            and current_state != old_state
+                        ):
+                            fd.seek(0)
+                            content = fd.read()
                 except Exception:
                     continue
 
-                if not content:
+                if not content or content.strip() == "":
                     continue
 
-                events.extend(
-                    cls.parse_events_from_text(
-                        content,
-                        source=source,
-                        extra={"log_path": file_path},
-                    )
+                text_sources.append(
+                    {
+                        "source": source,
+                        "path": file_path,
+                        "relative_path": cls._safe_relative_path(root_dir, file_path),
+                        "content": content,
+                    }
                 )
+        return text_sources
+
+    @classmethod
+    def extract_events_from_text_sources(
+        cls,
+        text_sources: Sequence[Dict[str, str]],
+    ) -> List[Dict[str, str]]:
+        events: List[Dict[str, str]] = []
+        for text_source in text_sources:
+            events.extend(
+                cls.parse_events_from_text(
+                    text_source.get("content", ""),
+                    source=text_source.get("source", "system-artifact"),
+                    extra={
+                        "log_path": text_source.get("path", ""),
+                        "relative_path": text_source.get("relative_path", ""),
+                    },
+                )
+            )
         return events
+
+    @classmethod
+    def extract_events_from_updated_files(
+        cls,
+        root_dir: str,
+        previous_state: Optional[Dict[str, Tuple[int, int]]] = None,
+        source: str = "system-artifact",
+    ) -> List[Dict[str, str]]:
+        return cls.extract_events_from_text_sources(
+            cls.collect_updated_text_sources(root_dir, previous_state, source=source)
+        )
 
     @staticmethod
     def _status(result: Optional[TestResult]) -> str:
@@ -266,6 +321,112 @@ class ParamTraceCollector(object):
             or event.get("operation") == cls.USE_BACKED_OPERATION
         ]
 
+    @staticmethod
+    def count_values(rows: Sequence[Dict[str, str]], key: str) -> Dict[str, int]:
+        counter = Counter()
+        for row in rows:
+            value = row.get(key, "")
+            if value:
+                counter[value] += 1
+        return dict(sorted(counter.items()))
+
+    @staticmethod
+    def distinct_values(rows: Sequence[Dict[str, str]], key: str) -> List[str]:
+        return sorted({row.get(key, "") for row in rows if row.get(key, "")})
+
+    @staticmethod
+    def _safe_testcase_id(testcase_id: str) -> str:
+        safe_chars = []
+        for ch in testcase_id:
+            if ch.isalnum() or ch in (".", "_", "-"):
+                safe_chars.append(ch)
+            else:
+                safe_chars.append("_")
+        safe_id = "".join(safe_chars).strip("._")
+        return safe_id if safe_id else "testcase"
+
+    @classmethod
+    def _artifact_target_path(cls, artifact_root: str, subdir: str, relative_path: str) -> str:
+        normalized = (relative_path or "").replace("\\", "/").strip("/")
+        parts = [part for part in normalized.split("/") if part not in ("", ".", "..")]
+        if len(parts) == 0:
+            parts = ["artifact"]
+        base_path = os.path.join(artifact_root, subdir, *parts)
+        return f"{base_path}.delta.txt"
+
+    def preserve_system_trace_artifacts(
+        self,
+        testcase_id: str,
+        system_trace_capture: Optional[Dict[str, object]],
+    ) -> Dict[str, object]:
+        if not system_trace_capture:
+            return {"artifact_dir": "", "artifacts": []}
+
+        artifact_root = os.path.join(
+            self.runDir,
+            "system_trace_artifacts",
+            self._safe_testcase_id(testcase_id),
+        )
+        artifacts: List[Dict[str, object]] = []
+
+        def write_artifact(
+            artifact_path: str,
+            content: str,
+            source: str,
+            original_path: str = "",
+            relative_path: str = "",
+        ) -> None:
+            if content.strip() == "":
+                return
+            os.makedirs(os.path.dirname(artifact_path), exist_ok=True)
+            with open(artifact_path, "w", encoding="utf-8") as fd:
+                fd.write(content)
+            artifacts.append(
+                {
+                    "source": source,
+                    "original_path": original_path,
+                    "relative_path": relative_path,
+                    "artifact_path": artifact_path,
+                    "line_count": len(content.splitlines()),
+                    "byte_count": len(content.encode("utf-8")),
+                }
+            )
+
+        stdout_text = str(system_trace_capture.get("stdout_text", "") or "")
+        stderr_text = str(system_trace_capture.get("stderr_text", "") or "")
+        if stdout_text.strip() != "":
+            write_artifact(
+                os.path.join(artifact_root, "stdout.txt"),
+                stdout_text,
+                source="system-stdout",
+            )
+        if stderr_text.strip() != "":
+            write_artifact(
+                os.path.join(artifact_root, "stderr.txt"),
+                stderr_text,
+                source="system-stderr",
+            )
+
+        for subdir, capture_key in (("logs", "log_sources"), ("shell", "shell_sources")):
+            for source_entry in system_trace_capture.get(capture_key, []) or []:
+                content = str(source_entry.get("content", "") or "")
+                if content.strip() == "":
+                    continue
+                relative_path = str(source_entry.get("relative_path", "") or "")
+                artifact_path = self._artifact_target_path(artifact_root, subdir, relative_path)
+                write_artifact(
+                    artifact_path,
+                    content,
+                    source=str(source_entry.get("source", "")),
+                    original_path=str(source_entry.get("path", "") or ""),
+                    relative_path=relative_path,
+                )
+
+        return {
+            "artifact_dir": artifact_root if artifacts else "",
+            "artifacts": artifacts,
+        }
+
     def record_testcase(
         self,
         testcase: Testcase,
@@ -274,6 +435,7 @@ class ParamTraceCollector(object):
         system_events: List[Dict[str, str]],
         unit_result: Optional[TestResult],
         system_result: Optional[TestResult],
+        system_trace_capture: Optional[Dict[str, object]] = None,
     ) -> str:
         testcase_id = testcase.fileName if testcase.fileName else os.path.basename(testcase.filePath)
         testcase_params = {item.name: item.value for item in testcase.confItemList}
@@ -286,6 +448,29 @@ class ParamTraceCollector(object):
         )
         unique_params = self._unique_params(all_events, operations={"GET", "SET", "EXERCISED"})
         system_provenance_events = self.extract_provenance_events(system_events)
+        system_exercised_events = [
+            event for event in system_events if event.get("operation") in {"GET", "SET", "EXERCISED"}
+        ]
+        system_trace_status = getattr(testcase, "systemTraceStatus", "no-system-run")
+        system_trace_details = dict(getattr(testcase, "systemTraceDetails", {}) or {})
+        system_trace_input_sources = list(system_trace_details.get("trace_input_sources", []))
+        system_event_sources = self.distinct_values(system_events, "source")
+        system_exercised_event_sources = self.distinct_values(system_exercised_events, "source")
+        artifact_info = self.preserve_system_trace_artifacts(testcase_id, system_trace_capture)
+        system_trace_details["system_event_sources"] = system_event_sources
+        system_trace_details["system_event_source_counts"] = self.count_values(system_events, "source")
+        system_trace_details["system_exercised_event_sources"] = system_exercised_event_sources
+        system_trace_details["system_exercised_event_source_counts"] = self.count_values(
+            system_exercised_events,
+            "source",
+        )
+        system_trace_details["system_event_log_paths"] = self.distinct_values(system_events, "log_path")
+        system_trace_details["system_exercised_event_log_paths"] = self.distinct_values(
+            system_exercised_events,
+            "log_path",
+        )
+        system_trace_details["artifact_dir"] = artifact_info["artifact_dir"]
+        system_trace_details["artifact_count"] = len(artifact_info["artifacts"])
 
         record = {
             "project": self.project,
@@ -302,6 +487,13 @@ class ParamTraceCollector(object):
                 getattr(testcase, "systemUseBackedExercisedConfNames", [])
             ),
             "system_exercise_workload_signature": getattr(testcase, "systemExerciseWorkloadSignature", ""),
+            "system_trace_status": system_trace_status,
+            "system_trace_input_sources": system_trace_input_sources,
+            "system_event_sources": system_event_sources,
+            "system_exercised_event_sources": system_exercised_event_sources,
+            "system_trace_details": system_trace_details,
+            "system_trace_artifact_dir": artifact_info["artifact_dir"],
+            "system_trace_artifacts": artifact_info["artifacts"],
             "unit_tests": sorted(set(unit_tests)),
             "unit_status": self._status(unit_result),
             "system_status": self._status(system_result),
@@ -336,10 +528,14 @@ class ParamTraceCollector(object):
                 f"{record['counts']['system_events']}\t{record['counts']['system_provenance_events']}\t"
                 f"{record['counts']['unit_unique_params']}\t{record['counts']['system_unique_params']}\t"
                 f"{record['counts']['system_use_backed_unique_params']}\t{record['counts']['unique_params']}\t"
-                f"{','.join(unique_params)}\n"
+                f"{','.join(unique_params)}\t{system_trace_status}\t"
+                f"{','.join(system_trace_input_sources)}\t{','.join(system_event_sources)}\t"
+                f"{','.join(system_exercised_event_sources)}\t"
+                f"{len(artifact_info['artifacts'])}\n"
             )
         self.logger.info(
             f">>>>[ParamTraceCollector] recorded {testcase_id} with "
-            f"{record['counts']['unique_params']} exercised params"
+            f"{record['counts']['unique_params']} exercised params "
+            f"({system_trace_status})"
         )
         return output_path

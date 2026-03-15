@@ -52,6 +52,39 @@ class TestSystemTesterTrackingEnv(unittest.TestCase):
         self.assertNotIn("JAVA_TOOL_OPTIONS", env)
         self.assertEqual(1, tester._build_system_java_command().count("-javaagent:"))
 
+    def test_trace_diagnostics_distinguish_zero_row_cases(self):
+        tester = SystemTester()
+
+        status, details = tester._summarize_trace_run("", "", [], [], [])
+        self.assertEqual("system-run-no-trace-sources", status)
+        self.assertEqual([], details["trace_input_sources"])
+
+        log_sources = [
+            {
+                "source": "system-log",
+                "path": "/tmp/logs/namenode.log",
+                "relative_path": "namenode.log",
+                "content": "INFO namenode started\n",
+            }
+        ]
+        status, details = tester._summarize_trace_run("", "", log_sources, [], [])
+        self.assertEqual("system-run-trace-sources-zero-extracted-params", status)
+        self.assertEqual(["log-files"], details["trace_input_sources"])
+        self.assertEqual(1, details["updated_log_file_count"])
+
+        system_events = [
+            {
+                "operation": "GET",
+                "param_name": "dfs.replication",
+                "source": "system-log",
+                "log_path": "/tmp/logs/namenode.log",
+            }
+        ]
+        status, details = tester._summarize_trace_run("", "", log_sources, [], system_events)
+        self.assertEqual("system-run-trace-sources-nonzero-extracted-params", status)
+        self.assertEqual(1, details["system_exercised_unique_param_count"])
+        self.assertEqual(["system-log"], details["system_exercised_event_sources"])
+
 
 if __name__ == "__main__":
     unittest.main()

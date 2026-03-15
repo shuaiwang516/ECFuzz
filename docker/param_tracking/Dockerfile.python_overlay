@@ -1,0 +1,5 @@
+FROM ecfuzz/ecfuzz-provenance-agent:local
+
+COPY --chown=hadoop:hadoop src/fuzzer.py /home/hadoop/ecfuzz/src/fuzzer.py
+COPY --chown=hadoop:hadoop src/seedGenerator/SeedGenerator.py /home/hadoop/ecfuzz/src/seedGenerator/SeedGenerator.py
+COPY --chown=hadoop:hadoop src/testValidator/SystemTester.py /home/hadoop/ecfuzz/src/testValidator/SystemTester.py

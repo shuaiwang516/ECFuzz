@@ -1,5 +1,8 @@
+import importlib
+import json
 import os
 import tempfile
+import time
 import unittest
 import sys
 
@@ -8,10 +11,17 @@ SRC_DIR = os.path.join(ROOT_DIR, "src")
 if SRC_DIR not in sys.path:
     sys.path.append(SRC_DIR)
 
+from dataModel.TestResult import TestResult
+from dataModel.Testcase import Testcase
+from utils.Configuration import Configuration
 from utils.ParamTraceCollector import ParamTraceCollector
 
 
 class TestParamTraceCollector(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        Configuration.parseConfiguration({})
+
     def test_parse_events_from_text_supports_legacy_and_structured_lines(self):
         text = "\n".join(
             [
@@ -80,6 +90,55 @@ class TestParamTraceCollector(unittest.TestCase):
             self.assertEqual("system-shell", events[0]["source"])
             self.assertEqual(artifact_path, events[0]["log_path"])
 
+    def test_collect_updated_text_sources_keeps_relative_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, "nested"), exist_ok=True)
+            artifact_path = os.path.join(tmpdir, "nested", "namenode.log")
+            with open(artifact_path, "w", encoding="utf-8") as fd:
+                fd.write("before-run\n")
+
+            snapshot = ParamTraceCollector.snapshot_file_state(tmpdir)
+
+            with open(artifact_path, "a", encoding="utf-8") as fd:
+                fd.write("INFO shell output\n")
+
+            text_sources = ParamTraceCollector.collect_updated_text_sources(
+                tmpdir,
+                snapshot,
+                source="system-log",
+            )
+
+            self.assertEqual(1, len(text_sources))
+            self.assertEqual("system-log", text_sources[0]["source"])
+            self.assertEqual("nested/namenode.log", text_sources[0]["relative_path"])
+            self.assertEqual(artifact_path, text_sources[0]["path"])
+            self.assertIn("INFO shell output", text_sources[0]["content"])
+
+    def test_collect_updated_text_sources_falls_back_to_full_rewritten_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_path = os.path.join(tmpdir, "hdfs_safety")
+            original_content = "1234567890\nabcdefghij\n"
+            rewritten_content = "abcdefghij\n1234567890\n"
+
+            with open(artifact_path, "w", encoding="utf-8") as fd:
+                fd.write(original_content)
+
+            snapshot = ParamTraceCollector.snapshot_file_state(tmpdir)
+            time.sleep(0.01)
+
+            with open(artifact_path, "w", encoding="utf-8") as fd:
+                fd.write(rewritten_content)
+
+            text_sources = ParamTraceCollector.collect_updated_text_sources(
+                tmpdir,
+                snapshot,
+                source="system-shell",
+            )
+
+            self.assertEqual(1, len(text_sources))
+            self.assertEqual(rewritten_content, text_sources[0]["content"])
+            self.assertEqual("hdfs_safety", text_sources[0]["relative_path"])
+
     def test_parse_exercised_param_marker(self):
         text = "[CTEST][EXERCISED-PARAM] name=dfs.blocksize"
 
@@ -104,6 +163,76 @@ class TestParamTraceCollector(unittest.TestCase):
         self.assertEqual("dfs.replication", events[0]["param_name"])
         self.assertEqual(["dfs.replication"], ParamTraceCollector.extract_use_backed_names(events))
         self.assertEqual(2, len(ParamTraceCollector.extract_provenance_events(events)))
+
+    def test_record_testcase_preserves_trace_artifacts_and_status(self):
+        module = importlib.import_module("utils.ParamTraceCollector")
+        old_fuzzer_dir = module.FUZZER_DIR
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module.FUZZER_DIR = tmpdir
+            try:
+                collector = module.ParamTraceCollector()
+                testcase = Testcase([])
+                testcase.fileName = "Testcase-1"
+                testcase.filePath = "/tmp/Testcase-1.xml"
+                testcase.systemTraceStatus = "system-run-trace-sources-zero-extracted-params"
+                testcase.systemTraceDetails = {"trace_input_sources": ["stdout", "log-files", "shell-files"]}
+
+                output_path = collector.record_testcase(
+                    testcase,
+                    unit_tests=[],
+                    unit_events=[],
+                    system_events=[],
+                    unit_result=TestResult(status=0),
+                    system_result=TestResult(status=0),
+                    system_trace_capture={
+                        "stdout_text": "system stdout\n",
+                        "stderr_text": "",
+                        "log_sources": [
+                            {
+                                "source": "system-log",
+                                "path": "/tmp/logs/hdfs.log",
+                                "relative_path": "namenode/hdfs.log",
+                                "content": "INFO namenode start\n",
+                            }
+                        ],
+                        "shell_sources": [
+                            {
+                                "source": "system-shell",
+                                "path": "/tmp/shell/start_hdfs",
+                                "relative_path": "start_hdfs",
+                                "content": "shell output\n",
+                            }
+                        ],
+                    },
+                )
+
+                with open(output_path, "r", encoding="utf-8") as fd:
+                    payload = json.load(fd)
+
+                self.assertEqual(
+                    "system-run-trace-sources-zero-extracted-params",
+                    payload["system_trace_status"],
+                )
+                self.assertEqual(["stdout", "log-files", "shell-files"], payload["system_trace_input_sources"])
+                self.assertEqual(3, len(payload["system_trace_artifacts"]))
+                self.assertTrue(os.path.isdir(payload["system_trace_artifact_dir"]))
+                for artifact in payload["system_trace_artifacts"]:
+                    self.assertTrue(os.path.exists(artifact["artifact_path"]))
+
+                with open(collector.summaryPath, "r", encoding="utf-8") as fd:
+                    rows = fd.read().splitlines()
+                header = rows[0].split("\t")
+                row = rows[1].split("\t")
+                row_map = dict(zip(header, row))
+                self.assertEqual(
+                    "system-run-trace-sources-zero-extracted-params",
+                    row_map["system_trace_status"],
+                )
+                self.assertEqual("stdout,log-files,shell-files", row_map["system_trace_input_sources"])
+                self.assertEqual("3", row_map["system_trace_artifact_count"])
+            finally:
+                module.FUZZER_DIR = old_fuzzer_dir
 
 
 if __name__ == "__main__":

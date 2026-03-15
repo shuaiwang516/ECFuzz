@@ -25,9 +25,13 @@ class DummySystemTester(object):
         self.lastUseBackedConfNames = []
         self.lastTraceEvents = []
         self.called = 0
+        self.replace_flags = []
+        self.testcase_file_paths = []
 
-    def runTest(self, testcase, stopSoon, recordStats=True):
+    def runTest(self, testcase, stopSoon, recordStats=True, replaceConfig=True):
         self.called += 1
+        self.replace_flags.append(replaceConfig)
+        self.testcase_file_paths.append(testcase.filePath)
         self.lastExercisedConfNames = ["bootstrap.a", "bootstrap.b"]
         self.lastUseBackedConfNames = ["bootstrap.a"]
         self.lastTraceEvents = [
@@ -52,6 +56,7 @@ class TestExerciseBootstrap(unittest.TestCase):
             Configuration.fuzzerConf["exercise_guided_mutation"] = "True"
             Configuration.fuzzerConf["use_provenance_agent"] = "True"
             Configuration.fuzzerConf["comparison_metrics_dir"] = tmpdir
+            Configuration.fuzzerConf["unit_testcase_dir"] = tmpdir
             ExerciseGuidanceState.configure_from_current()
             ProvenanceTrackingState.configure_from_current()
             validator = TestValidator()
@@ -65,6 +70,12 @@ class TestExerciseBootstrap(unittest.TestCase):
             self.assertEqual({"bootstrap.a"}, ProvenanceTrackingState.projectGlobalUseBackedParams)
             self.assertEqual(1, validator.sysTester.called)
             self.assertEqual(["bootstrap.a"], validator.sysTester.lastUseBackedConfNames)
+            self.assertEqual([False], validator.sysTester.replace_flags)
+            self.assertEqual(
+                [Configuration.putConf["replace_conf_path"]],
+                validator.sysTester.testcase_file_paths,
+            )
+            self.assertFalse(os.path.exists(os.path.join(tmpdir, "Bootstrap-default.xml")))
 
 
 if __name__ == "__main__":
