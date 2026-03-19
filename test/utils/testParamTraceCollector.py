@@ -82,13 +82,42 @@ class TestParamTraceCollector(unittest.TestCase):
             events = ParamTraceCollector.extract_events_from_updated_files(
                 tmpdir,
                 snapshot,
-                source="system-shell",
+                source="system-log",
             )
 
             self.assertEqual(1, len(events))
             self.assertEqual("dfs.replication", events[0]["param_name"])
-            self.assertEqual("system-shell", events[0]["source"])
+            self.assertEqual("system-log", events[0]["source"])
             self.assertEqual(artifact_path, events[0]["log_path"])
+
+    def test_collect_updated_text_sources_reads_full_system_shell_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_path = os.path.join(tmpdir, "start_hdfs")
+            with open(artifact_path, "w", encoding="utf-8") as fd:
+                fd.write("[CTEST][EXERCISED-PARAM] name=old.value\n")
+
+            snapshot = ParamTraceCollector.snapshot_file_state(tmpdir)
+            time.sleep(0.01)
+
+            rewritten_content = "\n".join(
+                [
+                    "[CTEST][EXERCISED-PARAM] name=new.value",
+                    "[CTEST][EXERCISED-PARAM] name=tail.value",
+                    "",
+                ]
+            )
+            with open(artifact_path, "w", encoding="utf-8") as fd:
+                fd.write(rewritten_content)
+
+            text_sources = ParamTraceCollector.collect_updated_text_sources(
+                tmpdir,
+                snapshot,
+                source="system-shell",
+            )
+
+            self.assertEqual(1, len(text_sources))
+            self.assertEqual(rewritten_content, text_sources[0]["content"])
+            self.assertEqual("start_hdfs", text_sources[0]["relative_path"])
 
     def test_collect_updated_text_sources_keeps_relative_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:

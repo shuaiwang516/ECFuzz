@@ -52,6 +52,24 @@ class TestSystemTesterTrackingEnv(unittest.TestCase):
         self.assertNotIn("JAVA_TOOL_OPTIONS", env)
         self.assertEqual(1, tester._build_system_java_command().count("-javaagent:"))
 
+    def test_alluxio_uses_only_shared_java_opts_for_provenance_agent(self):
+        Configuration.fuzzerConf["project"] = "alluxio"
+        Configuration.fuzzerConf["use_provenance_agent"] = "True"
+        Configuration.fuzzerConf["provenance_agent_mode"] = "active"
+
+        env = SystemTester()._build_system_env()
+
+        self.assertEqual("true", env["ECFUZZ_USE_PROVENANCE_AGENT"])
+        self.assertEqual(1, env["ALLUXIO_AGENT_JAVA_OPTS"].count("-javaagent:"))
+        self.assertNotIn("ALLUXIO_JAVA_OPTS", env)
+        self.assertNotIn("ALLUXIO_MASTER_JAVA_OPTS", env)
+        self.assertNotIn("ALLUXIO_WORKER_JAVA_OPTS", env)
+        self.assertNotIn("ALLUXIO_JOB_MASTER_JAVA_OPTS", env)
+        self.assertNotIn("ALLUXIO_JOB_WORKER_JAVA_OPTS", env)
+        self.assertNotIn("ALLUXIO_PROXY_JAVA_OPTS", env)
+        self.assertNotIn("ALLUXIO_LOGSERVER_JAVA_OPTS", env)
+        self.assertNotIn("ALLUXIO_USER_JAVA_OPTS", env)
+
     def test_trace_diagnostics_distinguish_zero_row_cases(self):
         tester = SystemTester()
 

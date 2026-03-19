@@ -10,9 +10,12 @@ import org.objectweb.asm.Type;
 import org.objectweb.asm.commons.AdviceAdapter;
 import org.objectweb.asm.commons.Method;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.IllegalClassFormatException;
 import java.security.ProtectionDomain;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
 
 public final class ProvenanceTransformer implements ClassFileTransformer {
@@ -63,7 +66,11 @@ public final class ProvenanceTransformer implements ClassFileTransformer {
     try {
       debug("transform-start", className, null);
       ClassReader reader = new ClassReader(classfileBuffer);
-      ClassWriter writer = new SafeClassWriter(reader, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+      ClassWriter writer = new SafeClassWriter(
+          reader,
+          ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS,
+          loader
+      );
       ClassVisitor visitor = new ProvenanceClassVisitor(writer, className, rules);
       reader.accept(visitor, ClassReader.EXPAND_FRAMES);
       debug("transform-ok", className, null);
@@ -278,7 +285,7 @@ public final class ProvenanceTransformer implements ClassFileTransformer {
           || opcode == Opcodes.IFNONNULL;
     }
 
-    private static String opcodeName(int opcode) {
+  private static String opcodeName(int opcode) {
       switch (opcode) {
         case Opcodes.IFEQ:
           return "IFEQ";
@@ -319,19 +326,232 @@ public final class ProvenanceTransformer implements ClassFileTransformer {
   }
 
   private static final class SafeClassWriter extends ClassWriter {
-    private SafeClassWriter(ClassReader reader, int flags) {
+    private final TypeHierarchyResolver resolver;
+
+    private SafeClassWriter(ClassReader reader, int flags, ClassLoader loader) {
       super(reader, flags);
+      this.resolver = new TypeHierarchyResolver(loader);
     }
 
     @Override
     protected String getCommonSuperClass(String type1, String type2) {
+      try {
+        return resolver.getCommonSuperClass(type1, type2);
+      } catch (Throwable ignored) {
+        return "java/lang/Object";
+      }
+    }
+  }
+
+  private static final class TypeHierarchyResolver {
+    private final ClassLoader loader;
+    private final ConcurrentHashMap<String, ClassInfo> cache =
+        new ConcurrentHashMap<String, ClassInfo>();
+
+    private TypeHierarchyResolver(ClassLoader loader) {
+      this.loader = loader;
+    }
+
+    private String getCommonSuperClass(String type1, String type2) {
       if (type1 == null || type2 == null) {
         return "java/lang/Object";
       }
       if (type1.equals(type2)) {
         return type1;
       }
+
+      if (isAssignableFrom(type1, type2)) {
+        return type1;
+      }
+      if (isAssignableFrom(type2, type1)) {
+        return type2;
+      }
+
+      ClassInfo type1Info = getClassInfo(type1);
+      ClassInfo type2Info = getClassInfo(type2);
+      if (type1Info == null || type2Info == null) {
+        String reflected = getCommonSuperClassFromReflectionIfSafe(type1, type2);
+        if (reflected != null) {
+          return reflected;
+        }
+        return "java/lang/Object";
+      }
+      if (type1Info.isInterface || type2Info.isInterface) {
+        return "java/lang/Object";
+      }
+
+      String current = type1Info.superName;
+      while (current != null) {
+        if (isAssignableFrom(current, type2)) {
+          return current;
+        }
+        ClassInfo currentInfo = getClassInfo(current);
+        if (currentInfo == null) {
+          break;
+        }
+        current = currentInfo.superName;
+      }
       return "java/lang/Object";
+    }
+
+    private String getCommonSuperClassFromReflectionIfSafe(String type1, String type2) {
+      if (!isPlatformClass(type1) || !isPlatformClass(type2)) {
+        return null;
+      }
+      return getCommonSuperClassFromReflection(type1, type2);
+    }
+
+    private String getCommonSuperClassFromReflection(String type1, String type2) {
+      try {
+        Class<?> class1 = loadRuntimeClass(type1);
+        Class<?> class2 = loadRuntimeClass(type2);
+        if (class1 == null || class2 == null) {
+          return null;
+        }
+        if (class1.isAssignableFrom(class2)) {
+          return Type.getInternalName(class1);
+        }
+        if (class2.isAssignableFrom(class1)) {
+          return Type.getInternalName(class2);
+        }
+        if (class1.isInterface() || class2.isInterface()) {
+          return "java/lang/Object";
+        }
+        Class<?> current = class1.getSuperclass();
+        while (current != null && !current.isAssignableFrom(class2)) {
+          current = current.getSuperclass();
+        }
+        return current == null ? "java/lang/Object" : Type.getInternalName(current);
+      } catch (Throwable ignored) {
+        return null;
+      }
+    }
+
+    private Class<?> loadRuntimeClass(String internalName) throws ClassNotFoundException {
+      String binaryName = toBinaryName(internalName);
+      ClassLoader preferredLoader = loader;
+      if (preferredLoader == null) {
+        preferredLoader = Thread.currentThread().getContextClassLoader();
+      }
+      if (preferredLoader != null) {
+        return Class.forName(binaryName, false, preferredLoader);
+      }
+      return Class.forName(binaryName, false, ProvenanceTransformer.class.getClassLoader());
+    }
+
+    private boolean isPlatformClass(String internalName) {
+      return internalName.startsWith("java/")
+          || internalName.startsWith("javax/")
+          || internalName.startsWith("jdk/")
+          || internalName.startsWith("sun/")
+          || internalName.startsWith("com/sun/")
+          || internalName.startsWith("org/w3c/")
+          || internalName.startsWith("org/xml/");
+    }
+
+    private boolean isAssignableFrom(String target, String source) {
+      if (target.equals(source) || "java/lang/Object".equals(target)) {
+        return true;
+      }
+      ClassInfo sourceInfo = getClassInfo(source);
+      if (sourceInfo == null) {
+        return false;
+      }
+      for (String interfaceName : sourceInfo.interfaces) {
+        if (target.equals(interfaceName) || isAssignableFrom(target, interfaceName)) {
+          return true;
+        }
+      }
+      String superName = sourceInfo.superName;
+      while (superName != null) {
+        if (target.equals(superName)) {
+          return true;
+        }
+        ClassInfo superInfo = getClassInfo(superName);
+        if (superInfo == null) {
+          break;
+        }
+        for (String interfaceName : superInfo.interfaces) {
+          if (target.equals(interfaceName) || isAssignableFrom(target, interfaceName)) {
+            return true;
+          }
+        }
+        superName = superInfo.superName;
+      }
+      return false;
+    }
+
+    private ClassInfo getClassInfo(String internalName) {
+      if (internalName == null || internalName.startsWith("[")) {
+        return null;
+      }
+      ClassInfo cached = cache.get(internalName);
+      if (cached != null) {
+        return cached;
+      }
+      ClassInfo loaded = loadClassInfo(internalName);
+      if (loaded == null) {
+        return null;
+      }
+      ClassInfo previous = cache.putIfAbsent(internalName, loaded);
+      return previous == null ? loaded : previous;
+    }
+
+    private ClassInfo loadClassInfo(String internalName) {
+      InputStream stream = null;
+      try {
+        String resourceName = internalName + ".class";
+        if (loader != null) {
+          stream = loader.getResourceAsStream(resourceName);
+        }
+        if (stream == null) {
+          ClassLoader contextLoader = Thread.currentThread().getContextClassLoader();
+          if (contextLoader != null) {
+            stream = contextLoader.getResourceAsStream(resourceName);
+          }
+        }
+        if (stream == null) {
+          stream = ClassLoader.getSystemResourceAsStream(resourceName);
+        }
+        if (stream == null) {
+          return null;
+        }
+        ClassReader reader = new ClassReader(stream);
+        return new ClassInfo(
+            (reader.getAccess() & Opcodes.ACC_INTERFACE) != 0,
+            reader.getSuperName(),
+            reader.getInterfaces()
+        );
+      } catch (IOException ignored) {
+        return null;
+      } finally {
+        if (stream != null) {
+          try {
+            stream.close();
+          } catch (IOException ignored) {
+            // best effort cleanup only
+          }
+        }
+      }
+    }
+
+    private String toBinaryName(String internalName) {
+      if (internalName.startsWith("[")) {
+        return internalName.replace('/', '.');
+      }
+      return internalName.replace('/', '.');
+    }
+  }
+
+  private static final class ClassInfo {
+    private final boolean isInterface;
+    private final String superName;
+    private final String[] interfaces;
+
+    private ClassInfo(boolean isInterface, String superName, String[] interfaces) {
+      this.isInterface = isInterface;
+      this.superName = superName;
+      this.interfaces = interfaces == null ? new String[0] : interfaces;
     }
   }
 }

@@ -77,6 +77,8 @@ cd "${ZOOKEEPER_ROOT}"
 mvn -pl zookeeper-server -am install -DskipTests
 cp -f "${ZOOKEEPER_TARGET}/zookeeper-3.5.6.jar" \
   "${ZOOKEEPER_RUNTIME}/lib/zookeeper-3.5.6.jar"
+cp -f /home/hadoop/ecfuzz/data/default_conf_file/zoo.cfg \
+  "${ZOOKEEPER_RUNTIME}/conf/zoo.cfg"
 
 cd /home/hadoop/ecfuzz/data/systest_java/hbase/hbaseapi
 mvn -q -DskipTests package
@@ -121,3 +123,29 @@ cp -f "${ALLUXIO_SERVER_ASSEMBLY}" \
   "${ALLUXIO_RUNTIME}/assembly/alluxio-server-2.1.0.jar"
 cp -f "${ALLUXIO_CLIENT_ASSEMBLY}" \
   "${ALLUXIO_RUNTIME}/client/alluxio-2.1.0-client.jar"
+
+python3 - <<'PY'
+from pathlib import Path
+
+config_path = Path("/home/hadoop/ecfuzz/data/app_sysTest/alluxio-2.1.0-work/libexec/alluxio-config.sh")
+config_text = config_path.read_text()
+old_block = """
+if [[ -n "${ALLUXIO_AGENT_JAVA_OPTS}" ]]; then
+    ALLUXIO_JAVA_OPTS+=" ${ALLUXIO_AGENT_JAVA_OPTS}"
+fi
+"""
+if old_block in config_text:
+    config_text = config_text.replace(old_block, "\n")
+config_path.write_text(config_text)
+
+launch_path = Path("/home/hadoop/ecfuzz/data/app_sysTest/alluxio-2.1.0-work/bin/launch-process")
+launch_text = launch_path.read_text()
+old_exec = '  exec ${JAVA} -cp ${ALLUXIO_SERVER_CLASSPATH} ${java_opts} "${main_class}" ${@:3}\n'
+new_exec = (
+    '  exec ${JAVA} -cp ${ALLUXIO_SERVER_CLASSPATH} '
+    '${ALLUXIO_AGENT_JAVA_OPTS:-} ${java_opts} "${main_class}" ${@:3}\n'
+)
+if old_exec in launch_text and "ALLUXIO_AGENT_JAVA_OPTS:-" not in launch_text:
+    launch_text = launch_text.replace(old_exec, new_exec)
+launch_path.write_text(launch_text)
+PY

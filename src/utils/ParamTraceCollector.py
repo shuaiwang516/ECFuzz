@@ -211,6 +211,7 @@ class ParamTraceCollector(object):
             return text_sources
 
         previous_state = previous_state or {}
+        read_full_file = source == "system-shell"
 
         for root, _, files in os.walk(root_dir):
             for filename in files:
@@ -230,14 +231,15 @@ class ParamTraceCollector(object):
 
                 try:
                     with open(file_path, "r", encoding="utf-8", errors="ignore") as fd:
-                        if old_state and file_stat.st_size >= old_state[0]:
+                        if (not read_full_file) and old_state and file_stat.st_size >= old_state[0]:
                             fd.seek(old_state[0])
                         content = fd.read()
                         # Some system-test artifacts are rewritten in place rather than appended.
                         # If the "tail since old size" is empty but the file changed, fall back to
                         # reading the full file so we do not silently drop rewritten trace output.
                         if (
-                            old_state
+                            (not read_full_file)
+                            and old_state
                             and content.strip() == ""
                             and current_state != old_state
                         ):

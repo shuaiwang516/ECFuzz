@@ -2,10 +2,20 @@ package ecfuzz.fixture;
 
 import ecfuzz.agent.runtime.TraceRuntime;
 
+import java.io.IOException;
+
 public final class FixtureMain {
   private String boundField;
   private static String staticBoundField;
   private static int sink;
+  private static final ThrowableSink THROWABLE_SINK = new ThrowableSink() {
+    @Override
+    public void accept(String message, Throwable throwable) {
+      if (message != null && throwable != null) {
+        sink += message.length() + throwable.getClass().getSimpleName().length();
+      }
+    }
+  };
 
   public static void main(String[] args) {
     String mode = args.length == 0 ? "direct" : args[0];
@@ -20,6 +30,8 @@ public final class FixtureMain {
       fixture.runArg();
     } else if ("static-field".equals(mode)) {
       fixture.runStaticField();
+    } else if ("throwable-merge".equals(mode)) {
+      fixture.runThrowableMerge(args.length > 1);
     } else {
       throw new IllegalArgumentException("unknown mode: " + mode);
     }
@@ -62,9 +74,28 @@ public final class FixtureMain {
     }
   }
 
+  private void runThrowableMerge(boolean firstBranch) {
+    Throwable throwable;
+    try {
+      if (firstBranch) {
+        throw new IOException("branch-a");
+      }
+      throw new IllegalArgumentException("branch-b");
+    } catch (IOException error) {
+      throwable = error;
+    } catch (RuntimeException error) {
+      throwable = error;
+    }
+    THROWABLE_SINK.accept(source("fixture.throwable", "value"), throwable);
+  }
+
   private void consume(String value) {
     if (value != null) {
       sink += value.length();
     }
+  }
+
+  private interface ThrowableSink {
+    void accept(String message, Throwable throwable);
   }
 }

@@ -21,6 +21,7 @@ COPY --chown=hadoop:hadoop src/utils/ParamTraceCollector.py /home/hadoop/ecfuzz/
 COPY --chown=hadoop:hadoop src/utils/ProvenanceTrackingState.py /home/hadoop/ecfuzz/src/utils/ProvenanceTrackingState.py
 COPY --chown=hadoop:hadoop src/utils/ShowStats.py /home/hadoop/ecfuzz/src/utils/ShowStats.py
 COPY --chown=hadoop:hadoop data/fuzzer/fuzzing.conf /home/hadoop/ecfuzz/data/fuzzer/fuzzing.conf
+COPY --chown=hadoop:hadoop data/default_conf_file/zoo.cfg /home/hadoop/ecfuzz/data/default_conf_file/zoo.cfg
 COPY --chown=hadoop:hadoop java/experimental-provenance-agent /home/hadoop/ecfuzz/java/experimental-provenance-agent
 
 COPY --chown=hadoop:hadoop docker/param_tracking/overrides/hadoop/Configuration.java /home/hadoop/ecfuzz/data/app/ctest-hadoop/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/conf/Configuration.java

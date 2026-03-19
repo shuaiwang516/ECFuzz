@@ -66,11 +66,20 @@ class TestValidator(object):
         testcase.writeToFile(fileDir=Configuration.fuzzerConf['unit_testcase_dir'])
 
     @staticmethod
+    def setOrAddConfItem(testcase: Testcase, name: str, conf_type: str, value: str) -> None:
+        for conf in testcase.confItemList:
+            if conf.name == name:
+                conf.type = conf_type
+                conf.value = value
+                return
+        testcase.addConfItem(ConfItem(name, conf_type, value))
+
+    @staticmethod
     def prepareTestcaseForExecution(testcase: Testcase) -> None:
         if Configuration.fuzzerConf['project'] == 'hadoop-common':
-            conf = ConfItem('fs.defaultFS', 'PORT', 'hdfs://127.0.0.1:9000')
-            if not testcase.__contains__(conf):
-                testcase.addConfItem(ConfItem('fs.defaultFS', 'PORT', 'hdfs://127.0.0.1:9000'))
+            TestValidator.setOrAddConfItem(testcase, 'fs.defaultFS', 'PORT', 'hdfs://127.0.0.1:9000')
+            # Keep the core-site testcase aligned with the runtime that prepare.sh formats.
+            TestValidator.setOrAddConfItem(testcase, 'hadoop.tmp.dir', 'DIRPATH', '/home/hadoop/tmp')
 
         if Configuration.fuzzerConf['project'] == 'hbase':
             conf = ConfItem('hbase.rootdir', 'DIRPATH', '/home/hadoop/hbase-2.2.2-work/hbase-tmp')

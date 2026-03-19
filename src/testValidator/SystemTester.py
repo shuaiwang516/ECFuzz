@@ -98,6 +98,20 @@ class SystemTester(Tester):
             mode = Configuration.fuzzerConf.get("provenance_agent_mode", "active")
             env["ECFUZZ_USE_PROVENANCE_AGENT"] = "true"
             env["ECFUZZ_PROVENANCE_AGENT_MODE"] = mode
+            if project == "alluxio":
+                for env_name in (
+                    "ALLUXIO_JAVA_OPTS",
+                    "ALLUXIO_MASTER_JAVA_OPTS",
+                    "ALLUXIO_JOB_MASTER_JAVA_OPTS",
+                    "ALLUXIO_WORKER_JAVA_OPTS",
+                    "ALLUXIO_JOB_WORKER_JAVA_OPTS",
+                    "ALLUXIO_PROXY_JAVA_OPTS",
+                    "ALLUXIO_LOGSERVER_JAVA_OPTS",
+                    "ALLUXIO_USER_JAVA_OPTS",
+                ):
+                    env.pop(env_name, None)
+                env["ALLUXIO_AGENT_JAVA_OPTS"] = agent_opts
+                return env
             project_opt_envs = {
                 "hadoop-common": (
                     "HADOOP_OPTS",
@@ -127,16 +141,6 @@ class SystemTester(Tester):
                     "HBASE_SHELL_OPTS",
                 ),
                 "zookeeper": ("SERVER_JVMFLAGS", "CLIENT_JVMFLAGS", "JVMFLAGS"),
-                "alluxio": (
-                    "ALLUXIO_JAVA_OPTS",
-                    "ALLUXIO_MASTER_JAVA_OPTS",
-                    "ALLUXIO_JOB_MASTER_JAVA_OPTS",
-                    "ALLUXIO_WORKER_JAVA_OPTS",
-                    "ALLUXIO_JOB_WORKER_JAVA_OPTS",
-                    "ALLUXIO_PROXY_JAVA_OPTS",
-                    "ALLUXIO_LOGSERVER_JAVA_OPTS",
-                    "ALLUXIO_USER_JAVA_OPTS",
-                ),
             }
             for env_name in project_opt_envs.get(project, ()):
                 current_value = env.get(env_name, "").strip()
