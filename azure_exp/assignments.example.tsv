@@ -1,0 +1,11 @@
+machine_line	project	mode	run_hours	label
+1	hadoop-common	ECFuzz	24	orig-hcommon
+2	hadoop-hdfs	ECFuzz	24	orig-hdfs
+3	hbase	ECFuzz	24	orig-hbase
+4	zookeeper	ECFuzz	24	orig-zk
+5	alluxio	ECFuzz	24	orig-alluxio
+6	hadoop-common	ECFuzzParamTracking	24	tracking-hcommon
+7	hadoop-hdfs	ECFuzzParamTracking	24	tracking-hdfs
+8	hbase	ECFuzzParamTracking	24	tracking-hbase
+9	zookeeper	ECFuzzParamTracking	24	tracking-zk
+10	alluxio	ECFuzzParamTracking	24	tracking-alluxio

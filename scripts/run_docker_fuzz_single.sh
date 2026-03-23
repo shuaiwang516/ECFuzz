@@ -103,6 +103,7 @@ DRY_RUN="false"
 EXPLORE_RATIO=""
 ENSURE_IMAGE="true"
 REBUILD_IMAGE="false"
+FUZ_EXIT_IDLE_SECONDS="${ECFUZZ_FUZZ_EXIT_IDLE_SECONDS:-${ECFUZZ_FUZZ_EXIT_GRACE_SECONDS:-600}}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -196,6 +197,13 @@ if ! [[ "${FUZZING_LOOP}" =~ ^-?[0-9]+$ ]]; then
   exit 1
 fi
 
+if ! [[ "${FUZ_EXIT_IDLE_SECONDS}" =~ ^[0-9]+$ ]]; then
+  echo "ECFUZZ_FUZZ_EXIT_IDLE_SECONDS must be a non-negative integer" >&2
+  exit 1
+fi
+
+FUZ_RUNTIME_SECONDS="$(( RUN_HOURS * 3600 ))"
+
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 SAFE_LABEL=""
 if [[ -n "${LABEL}" ]]; then
@@ -211,6 +219,7 @@ LOG_DIR="${CASE_ROOT}/logs"
 LOG_FILE="${LOG_DIR}/fuzzer.log"
 MANIFEST_FILE="${CASE_ROOT}/manifest.txt"
 PREP_LOG_IN_CONTAINER="/home/hadoop/ecfuzz/agent_runner_logs/prepare.log"
+FUZZER_LOG_IN_CONTAINER="/home/hadoop/ecfuzz/data/fuzzer/fuzzer.log"
 
 mkdir -p "${OUTPUT_DIR}" "${METRICS_DIR}" "${TRACE_DIR}" "${LOG_DIR}"
 chmod -R 777 "${CASE_ROOT}"
@@ -273,10 +282,50 @@ fi
 echo "[runner] prepare.sh completed"
 cd /home/hadoop/ecfuzz
 set +e
-sudo -u hadoop -H bash -lc $(printf '%q' "${FUZ_CMD_STRING}")
+sudo -u hadoop -H bash -lc $(printf '%q' "${FUZ_CMD_STRING}") &
+fuzz_wrapper_pid=\$!
+fuzz_idle_timeout_triggered="false"
+fuzz_last_log_size="-1"
+fuzz_started_at=\$(date +%s)
+fuzz_last_log_update_at="\${fuzz_started_at}"
+while kill -0 "\${fuzz_wrapper_pid}" >/dev/null 2>&1; do
+  fuzz_now=\$(date +%s)
+  if [[ -f "${FUZZER_LOG_IN_CONTAINER}" ]]; then
+    fuzz_log_size=\$(wc -c < "${FUZZER_LOG_IN_CONTAINER}" 2>/dev/null || echo 0)
+    if [[ "\${fuzz_log_size}" != "\${fuzz_last_log_size}" ]]; then
+      fuzz_last_log_size="\${fuzz_log_size}"
+      fuzz_last_log_update_at="\${fuzz_now}"
+    fi
+  fi
+
+  if (( fuzz_now - fuzz_started_at >= ${FUZ_RUNTIME_SECONDS} )) && (( fuzz_now - fuzz_last_log_update_at >= ${FUZ_EXIT_IDLE_SECONDS} )); then
+    echo "[runner] fuzzer log idle for ${FUZ_EXIT_IDLE_SECONDS}s after configured runtime; terminating"
+    fuzz_idle_timeout_triggered="true"
+    pkill -TERM -P "\${fuzz_wrapper_pid}" 2>/dev/null || true
+    kill -TERM "\${fuzz_wrapper_pid}" 2>/dev/null || true
+    sleep 5
+    pkill -KILL -P "\${fuzz_wrapper_pid}" 2>/dev/null || true
+    kill -KILL "\${fuzz_wrapper_pid}" 2>/dev/null || true
+    break
+  fi
+  sleep 5
+done
+wait "\${fuzz_wrapper_pid}"
 fuzz_rc=\$?
 set -e
-cp -f /home/hadoop/ecfuzz/data/fuzzer/fuzzer.log /home/hadoop/ecfuzz/agent_runner_logs/internal_fuzzer.log 2>/dev/null || true
+
+if [[ "\${fuzz_idle_timeout_triggered}" == "true" ]]; then
+  if [[ -f "${FUZZER_LOG_IN_CONTAINER}" ]] \
+    && grep -q "Have a good day!" "${FUZZER_LOG_IN_CONTAINER}" \
+    && grep -q "ShowStats finish" "${FUZZER_LOG_IN_CONTAINER}"; then
+    echo "[runner] fuzzer log went idle after completion markers; treating as success"
+    fuzz_rc=0
+  else
+    echo "[runner] fuzzer log went idle after runtime without completion markers" >&2
+  fi
+fi
+
+cp -f "${FUZZER_LOG_IN_CONTAINER}" /home/hadoop/ecfuzz/agent_runner_logs/internal_fuzzer.log 2>/dev/null || true
 exit "\${fuzz_rc}"
 EOF
 
@@ -303,6 +352,8 @@ DOCKER_CMD=(
   echo "comparison_metrics_dir=${METRICS_DIR}"
   echo "param_tracking_dir=${TRACE_DIR}"
   echo "prepare_log_in_container=${PREP_LOG_IN_CONTAINER}"
+  echo "fuzz_exit_idle_seconds=${FUZ_EXIT_IDLE_SECONDS}"
+  echo "fuzz_runtime_seconds=${FUZ_RUNTIME_SECONDS}"
   echo "uses_privileged=true"
   echo "command=${INNER_CMD}"
 } >"${MANIFEST_FILE}"
